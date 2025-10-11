@@ -1,6 +1,7 @@
 # based on https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3
 # based on https://dougspeed.com/reference-panel/
 
+# 1. Setup directories
 DIRECTORY_RAW=/data/GWAS_data/files/references/1000genomes/phase3/raw/
 DIRECTORY_PROCESSED=/data/GWAS_data/files/references/1000genomes/phase3/processed/
 DIRECTORY_TOOLS=~/tools/
