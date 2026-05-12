@@ -15,17 +15,44 @@ GWASprocessing is a manifest-driven Nextflow workflow for staging GWAS summary s
 
 ## Quick Start
 
-Edit the root `.env` file to set paths/tokens as needed. It is local-only and ignored by git.
+### 1: `.env` and `references/`
+
+Create a `.env` file with paths/tokens, see: [.env.example](.env.example)
+
+Reference data scripts live in `src/reference_data/` and write to `references/` by default. The standardisation workflow expects 1000 Genomes lookup tables under `references/1000genomes/phase3/lookup/`. The lookup tables are used for rsID mapping and EAF filling when those values are missing from a GWAS. The 1000 Genomes download and processing is based on:
+- [https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3](https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3)
+- [https://dougspeed.com/reference-panel/](https://dougspeed.com/reference-panel/)
+
+### 2: manifest
+
+Use [manifests/test.tsv](manifests/test.tsv) as the starting point for how to structure your manifest file. You can run the pipeline using the test manifest with:
 
 ```bash
-$EDITOR .env
+bash src/standardise.sh --manifest manifests/test.tsv
 ```
 
-Run the default manifest:
+The test manifest includes 3 GWAS. These are all the same GWAS but from 3 different sources. The standardised output of for these GWAS will be slightly different to one another because the data are filtered/processed slightly differently by `OpenGWAS` and `GWAS catalogue`.
 
-```bash
-bash src/standardise.sh
+The required manifest columns are:
+
+```text
+GWAS_location	phenotype	ancestry	author	year	PMID
 ```
+
+Optional manifest columns can be added only when automatic detection is not enough:
+
+```text
+sex	source_type	input_build	population	delimiter	format	study_yaml
+```
+
+- `ancestry` describes the GWAS sample ancestry reported by the source or paper, and should normally be populated for every row using super populations:
+  -  `ALL`, `AFR`, `AMR`, `EAS`, `EUR`, `SAS` 
+- `population` is only a technical override for the reference-panel lookup used during rsID/SNPID mapping, coordinate filling, and EAF filling
+  - leave `population` blank unless the ancestry label does not map cleanly to a 1000 Genomes group or you deliberately want a specific reference lookup
+
+The pipeline derives `STUDYID` as `<author>_<year>_<PMID>`, records completed rows in `GWAS/.standardise_state.tsv`, and skips rows whose GWAS-VCF, index, metadata JSON, QC JSON, and required QC plot already exist.
+
+### 3: run
 
 On a local machine, the wrapper runs only one eligible manifest row per invocation. Re-run the same command to process the next incomplete row. Completed rows are recorded in `GWAS/.standardise_state.tsv` and skipped automatically.
 
@@ -45,22 +72,6 @@ bash src/standardise.sh --qcplot false
 ```
 
 `--row-limit 1` is the default for `--profile local`; `--row-limit 0` means no limit and is the default for `--profile slurm`.
-
-The required manifest columns are:
-
-```text
-GWAS_location	phenotype	ancestry	author	year	PMID
-```
-
-Optional manifest columns can be added only when automatic detection is not enough:
-
-```text
-sex	source_type	input_build	population	delimiter	format	study_yaml
-```
-
-`ancestry` and `population` have different purposes. `ancestry` describes the GWAS sample ancestry reported by the source or paper, and should normally be populated for every row, for example `EUR`, `African American`, `East Asian`, `multi-ancestry`, or `all`. `population` is only a technical override for the reference-panel lookup used during rsID/SNPID mapping, coordinate filling, and EAF filling. Leave `population` blank unless the ancestry label does not map cleanly to a 1000 Genomes group or you deliberately want a specific reference lookup such as `AFR`, `AMR`, `EAS`, `EUR`, `SAS`, or `ALL`.
-
-The pipeline derives `STUDYID` as `<author>_<year>_<PMID>`, records completed rows in `GWAS/.standardise_state.tsv`, and skips rows whose GWAS-VCF, index, metadata JSON, QC JSON, and required QC plot already exist.
 
 ## Outputs
 
@@ -112,13 +123,3 @@ df <- data.frame(
   stringsAsFactors = FALSE
 )
 ```
-
-## References
-
-Reference data scripts live in `src/reference_data/` and write to `references/` by default. The standardisation workflow expects 1000 Genomes lookup tables under:
-
-```text
-references/1000genomes/phase3/lookup/
-```
-
-The lookup tables are used for rsID mapping and EAF filling when those values are missing from a GWAS.
