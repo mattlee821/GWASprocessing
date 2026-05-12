@@ -1,0 +1,18 @@
+description: Pietzner et al. Fenland Somalogic pGWAS
+input_build: hg19
+delimiter: "\t"
+columns:
+  CHR: chr
+  POS: pos
+  SNP: rsid
+  EA: Allele1
+  OA: Allele2
+  EAF: Freq1
+  BETA: Effect
+  SE: StdErr
+  P: Pvalue
+  N: TotalSampleSize
+transforms:
+  uppercase_alleles: true
+extras:
+  - Direction

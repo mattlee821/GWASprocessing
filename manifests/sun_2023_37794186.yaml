@@ -1,0 +1,29 @@
+description: Sun et al. UKB-PPP Olink pGWAS
+input_build: hg38
+delimiter: "\\s+"
+columns:
+  CHR: CHROM
+  POS38: POS38
+  POS19: POS19
+  SNPID: ID
+  SNP: rsid
+  EA: ALLELE1
+  OA: ALLELE0
+  EAF: A1FREQ
+  BETA: BETA
+  SE: SE
+  LOG10P: LOG10P
+  N: N
+joins:
+  - file: "${GWAS_WORK_ROOT}/sun_2023_37794186/docs/SNP RSID maps/map_ID-rsid.txt.gz"
+    left_on: ID
+    right_on: ID
+    how: left
+transforms:
+  uppercase_alleles: true
+extras:
+  - INFO
+  - CHISQ
+  - TEST
+  - EXTRA
+  - LOG10P

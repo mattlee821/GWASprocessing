@@ -1,0 +1,22 @@
+description: Zhang et al. ARIC Somalogic pGWAS
+input_build: hg38
+delimiter: "\t"
+columns:
+  CHR: CHROM
+  POS: POS
+  SNP: ID
+  SNPID: ID
+  EA: A1
+  EAF: A1_FREQ
+  BETA: BETA
+  SE: SE
+  P: P
+  N: OBS_CT
+  REF: REF
+  ALT: ALT
+transforms:
+  strip_hash_header: true
+  derive_oa_from_ref_alt: true
+  uppercase_alleles: true
+extras:
+  - ERRCODE

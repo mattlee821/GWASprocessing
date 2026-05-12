@@ -1,0 +1,27 @@
+description: Ferkingstad et al. deCODE Somalogic pGWAS
+input_build: hg38
+delimiter: "\t"
+columns:
+  CHR: Chrom_x
+  POS: Pos_x
+  SNP: rsids_y
+  EA: effectAllele_y
+  OA: otherAllele_y
+  EAF: effectAlleleFreq
+  BETA: Beta
+  SE: SE
+  P: Pval
+  LOG10P: minus_log10_pval
+  N: N
+exclude:
+  file: "${GWAS_WORK_ROOT}/ferkingstad_2021_34857953/docs/assocvariants.excluded.txt"
+  key: Name
+joins:
+  - file: "${GWAS_WORK_ROOT}/ferkingstad_2021_34857953/docs/assocvariants.annotated.txt"
+    on: Name
+    how: left
+transforms:
+  uppercase_alleles: true
+  strip_chr_prefix: true
+extras:
+  - minus_log10_pval

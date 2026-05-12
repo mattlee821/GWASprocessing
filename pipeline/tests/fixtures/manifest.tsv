@@ -1,0 +1,2 @@
+GWAS_location	phenotype	ancestry	author	year	PMID
+pipeline/tests/fixtures/tables/generic.tsv	BMI	all	Locke	2015	25673413
