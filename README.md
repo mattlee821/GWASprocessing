@@ -19,6 +19,8 @@ GWASprocessing is a manifest-driven Nextflow workflow for staging GWAS summary s
 
 Create a `.env` file with paths/tokens, see: [.env.example](.env.example)
 
+OpenGWAS sources require authentication. Set `OPENGWAS_JWT` in `.env` to a valid token (generate or renew one at [https://api.opengwas.io/profile/](https://api.opengwas.io/profile/)). If the token is missing or rejected (expired/invalid), any OpenGWAS row fails with an explicit error prompting you to supply a valid token, and the run is halted (exit code 78) rather than silently skipping the row. Manifests without OpenGWAS sources do not need a token.
+
 Reference data scripts live in `src/reference_data/` and write to `references/` by default. The standardisation workflow expects 1000 Genomes lookup tables under `references/1000genomes/phase3/lookup/`. The lookup tables are used for rsID mapping and EAF filling when those values are missing from a GWAS. The 1000 Genomes download and processing is based on:
 - [https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3](https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3)
 - [https://dougspeed.com/reference-panel/](https://dougspeed.com/reference-panel/)
@@ -62,7 +64,7 @@ Useful options:
 
 ```bash
 bash src/standardise.sh --manifest manifests/main.tsv
-bash src/standardise.sh --manifest manifests/locke_2015_25673413.tsv
+bash src/standardise.sh --manifest manifests/test.tsv
 bash src/standardise.sh --study-yaml manifests/ferkingstad_2021_34857953.yaml
 bash src/standardise.sh --profile slurm
 bash src/standardise.sh --row-limit 0
@@ -95,9 +97,13 @@ GWAS/<STUDYID>/standardise/<SOURCE_ID>/standardised.tiff
 `GWAS_location` is used to infer the staging method:
 
 - GWAS Catalog study URLs/accessions use the GWAS Catalog downloader and prioritise harmonised FTP summary statistics.
-- OpenGWAS dataset URLs/IDs use `ieugwaspy.query.gwasinfo()` and `ieugwaspy.query.gwasinfo_files()`.
+- OpenGWAS dataset URLs/IDs use the authenticated OpenGWAS API (`POST /api/gwasinfo` and `POST /api/gwasinfo/files`) with the `OPENGWAS_JWT` token. The downloaded GWAS-VCF is passed through with metadata headers normalised; it is not re-derived from a table.
 - Direct URLs and local files use generic staging, automatic delimiter detection, global column aliases, and reference lookup for missing coordinates where possible.
 - Study-specific YAML files in `manifests/` provide overrides for joins, exclusions, allele rules, unusual column names, and P-value derivation. Locke is intentionally handled without a YAML config.
+
+## Coordinate build
+
+Table-derived outputs (GWAS Catalog, direct URLs, local tables) are written on GRCh38: `#CHROM`/`POS` are GRCh38 and the GRCh37 position is carried in the `POS19` INFO field where available. OpenGWAS and other pre-built GWAS-VCFs are passed through on their **source** coordinates and are not lifted over, so an OpenGWAS dataset reported on GRCh37 stays on GRCh37. Each output's actual assembly is recorded as `coordinate_build` in `standardised.metadata.json` (and `standardised.qc.json`), detected from the source VCF header for passthrough files. Check `coordinate_build` before merging or comparing outputs by position, as rows from different sources for the same study may be on different builds.
 
 ## Conversion
 

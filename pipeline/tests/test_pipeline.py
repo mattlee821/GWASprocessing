@@ -331,9 +331,53 @@ class PipelineTests(unittest.TestCase):
             text = subprocess.check_output(["gzip", "-cd", result["standard_vcf"]], text=True)
             metadata = json.loads(Path(result["metadata_json"]).read_text(encoding="utf-8"))
             self.assertEqual(metadata["sex"], "female")
+            self.assertEqual(metadata["coordinate_build"], "GRCh38")
             self.assertIn("##sex=female", text)
             self.assertIn("rs1", text)
             self.assertIn("\t1000\trs1\tG\tA\t", text)
+
+    def test_zhang_derive_oa_from_ref_alt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            raw = FIXTURES / "tables/zhang_plink.tsv"
+            stage_record = tmp / "stage.json"
+            output_prefix = tmp / "standardise/test"
+            record = {
+                "GWAS_location": str(raw),
+                "phenotype": "protein",
+                "ancestry": "EUR",
+                "sex": "combined",
+                "author": "Zhang",
+                "year": "2022",
+                "PMID": "35501419",
+                "study_id": "zhang_2022_35501419",
+                "output_id": "test",
+                "row_hash": "abc",
+                "source_type": "local",
+                "raw_path": str(raw),
+                "output_prefix": str(output_prefix),
+                "standardise_dir": str(output_prefix.parent),
+                "metadata": {},
+            }
+            stage_record.write_text(json.dumps(record), encoding="utf-8")
+            out_record = tmp / "record.json"
+            self.run_py(
+                "standardise_gwas.py",
+                "--stage-record",
+                stage_record,
+                "--config-root",
+                ROOT / "manifests",
+                "--reference-root",
+                FIXTURES / "reference",
+                "--output",
+                out_record,
+            )
+            result = json.loads(out_record.read_text(encoding="utf-8"))
+            qc = json.loads(Path(result["qc_json"]).read_text(encoding="utf-8"))
+            self.assertTrue(qc.get("derived_oa_from_ref_alt"))
+            text = subprocess.check_output(["gzip", "-cd", result["standard_vcf"]], text=True)
+            # rs5: REF=G, ALT=A, A1(EA)=A -> EA==ALT so derived OA=REF=G.
+            self.assertIn("\t5000\trs5\tG\tA\t", text)
 
     def test_existing_gwas_vcf_gets_manifest_sex_metadata(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -377,6 +421,56 @@ class PipelineTests(unittest.TestCase):
             self.assertEqual(metadata["sex"], "male")
             self.assertIn("##sex=male", text)
             self.assertIn("#CHROM", text)
+
+    def test_passthrough_vcf_reports_source_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            raw = tmp / "grch37.gwas.vcf"
+            raw.write_text(
+                "##fileformat=VCFv4.2\n"
+                "##contig=<ID=1,length=249250621,assembly=HG19/GRCh37>\n"
+                '##FORMAT=<ID=ES,Number=A,Type=Float,Description="effect">\n'
+                "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\tBMI\n"
+                "1\t721290\trs12565286\tG\tC\t.\tPASS\t.\tES\t0.01\n",
+                encoding="utf-8",
+            )
+            stage_record = tmp / "stage.json"
+            output_prefix = tmp / "standardise/test"
+            record = {
+                "GWAS_location": str(raw),
+                "phenotype": "BMI",
+                "ancestry": "ALL",
+                "sex": "combined",
+                "author": "Locke",
+                "year": "2015",
+                "PMID": "25673413",
+                "study_id": "locke_2015_25673413",
+                "output_id": "test",
+                "row_hash": "abc",
+                "source_type": "local",
+                "raw_path": str(raw),
+                "output_prefix": str(output_prefix),
+                "standardise_dir": str(output_prefix.parent),
+                "metadata": {},
+            }
+            stage_record.write_text(json.dumps(record), encoding="utf-8")
+            out_record = tmp / "record.json"
+            self.run_py(
+                "standardise_gwas.py",
+                "--stage-record",
+                stage_record,
+                "--config-root",
+                tmp / "empty_manifests",
+                "--reference-root",
+                FIXTURES / "reference",
+                "--output",
+                out_record,
+            )
+            result = json.loads(out_record.read_text(encoding="utf-8"))
+            metadata = json.loads(Path(result["metadata_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(metadata["coordinate_build"], "GRCh37")
+            qc = json.loads(Path(result["qc_json"]).read_text(encoding="utf-8"))
+            self.assertEqual(qc["coordinate_build"], "GRCh37")
 
     def test_qc_plot_generates_tiff(self):
         with tempfile.TemporaryDirectory() as tmp:

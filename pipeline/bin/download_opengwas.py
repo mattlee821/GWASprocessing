@@ -1,33 +1,39 @@
 #!/usr/bin/env python3
-"""Download OpenGWAS GWAS-VCF files using ieugwaspy gwasinfo_files()."""
+"""Download OpenGWAS GWAS-VCF files via the authenticated OpenGWAS API.
+
+A valid JWT in the OPENGWAS_JWT environment variable is required. If the token
+is missing or rejected (expired/invalid) the download fails with an explicit
+error telling the user to provide a valid token; there is no unauthenticated
+fallback.
+"""
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
+import sys
 from pathlib import Path
 
 import requests
 
 from gwas_pipeline_common import download_url, ensure_dir, write_json
 
-MAIN_FIELDS_ORDER = [
-    "trait",
-    "build",
-    "category",
-    "subcategory",
-    "population",
-    "sex",
-    "author",
-    "year",
-    "ontology",
-    "unit",
-    "sample_size",
-    "consortium",
-    "mr",
-    "priority",
-]
+API_ROOT = "https://api.opengwas.io/api"
+# sysexits.h EX_CONFIG: a configuration/authentication error the user must fix.
+# The Nextflow errorStrategy terminates the whole run on this code (rather than
+# ignoring the row) so the prompt to supply a valid token is not missed.
+EXIT_CONFIG = 78
+TOKEN_HELP = (
+    "Provide a valid token in the .env file as OPENGWAS_JWT=<token>. "
+    "Generate or renew one at https://api.opengwas.io/profile/ ."
+)
+
+
+def config_error(message: str) -> "SystemExit":
+    print(message, file=sys.stderr)
+    return SystemExit(EXIT_CONFIG)
 
 
 def opengwas_id(location: str) -> str:
@@ -35,30 +41,6 @@ def opengwas_id(location: str) -> str:
     if not match:
         raise ValueError(f"Could not find OpenGWAS dataset ID in: {location}")
     return match.group(1).lower()
-
-
-def first_url(value):
-    if isinstance(value, str) and value.startswith(("http://", "https://")):
-        return value
-    if isinstance(value, dict):
-        for item in value.values():
-            result = first_url(item)
-            if result:
-                return result
-    if isinstance(value, list):
-        for item in value:
-            result = first_url(item)
-            if result:
-                return result
-    return None
-
-
-def api_error(payload) -> str:
-    if isinstance(payload, dict):
-        message = str(payload.get("message", ""))
-        if message.upper().startswith("ERROR"):
-            return message
-    return ""
 
 
 def collect_urls(payload) -> list[str]:
@@ -75,83 +57,53 @@ def collect_urls(payload) -> list[str]:
     return sorted(set(urls))
 
 
-def trial_files(dataset_id: str, file_type: str):
-    response = requests.post(
-        "https://api.opengwas.io/api/gwasinfo/files/trial",
-        json={"id": dataset_id, "type": file_type},
-        timeout=60,
-    )
+def opengwas_jwt() -> str:
+    token = os.environ.get("OPENGWAS_JWT", "").strip()
+    if not token:
+        raise config_error(
+            "OpenGWAS authentication is required but OPENGWAS_JWT is not set. " + TOKEN_HELP
+        )
+    return token
+
+
+def opengwas_api(method: str, path: str, token: str, **kwargs) -> dict | list:
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    try:
+        response = requests.request(method, f"{API_ROOT}{path}", headers=headers, timeout=120, **kwargs)
+    except requests.RequestException as exc:
+        raise SystemExit(f"OpenGWAS API request failed ({method} {path}): {exc}") from exc
+    if response.status_code in (401, 403):
+        try:
+            detail = str(response.json().get("message", response.text))
+        except ValueError:
+            detail = response.text
+        raise config_error(
+            f"OpenGWAS rejected the JWT in OPENGWAS_JWT (HTTP {response.status_code}): "
+            f"{detail[:200]} The token is missing, expired, or invalid. " + TOKEN_HELP
+        )
     response.raise_for_status()
     return response.json()
 
 
-def public_gwasinfo(dataset_id: str) -> dict:
-    response = requests.get("https://opengwas.io/data/gwasinfo/gwasinfo.json", timeout=120)
-    response.raise_for_status()
-    payload = response.json()
-    compressed = payload.get("datasets_compressed", {}).get(dataset_id)
-    if not compressed:
-        return {}
-    main_values, additional = compressed
-    coding = payload.get("majority_fields_and_coding", {})
-    info = {}
-    for index, field in enumerate(MAIN_FIELDS_ORDER):
-        value = main_values[index] if index < len(main_values) else None
-        values = coding.get(field)
-        if isinstance(values, list) and isinstance(value, int) and 0 <= value < len(values):
-            value = values[value]
-        info[field] = value
-    if isinstance(additional, dict):
-        info.update(additional)
-    info["id"] = dataset_id
-    return info
-
-
 def download_opengwas(location: str, out_dir: str | Path) -> dict:
-    try:
-        from ieugwaspy import query
-    except ImportError as exc:
-        raise SystemExit(
-            "ieugwaspy is required for OpenGWAS downloads. Install it or provide a local/direct GWAS_location."
-        ) from exc
-
     out_dir = ensure_dir(out_dir)
     dataset_id = opengwas_id(location)
-    try:
-        info = query.gwasinfo([dataset_id])
-    except TypeError:
-        info = query.gwasinfo(dataset_id)
-    if api_error(info):
-        info = public_gwasinfo(dataset_id)
+    token = opengwas_jwt()
 
-    try:
-        files = query.gwasinfo_files([dataset_id])
-    except TypeError:
-        files = query.gwasinfo_files(dataset_id)
-    files_error = api_error(files)
-    if files_error:
-        files = {
-            "source": "opengwas_trial_endpoint",
-            "api_error": files_error,
-            "vcf": trial_files(dataset_id, "vcf"),
-            "report": trial_files(dataset_id, "report"),
-        }
+    info = opengwas_api("POST", "/gwasinfo", token, json={"id": [dataset_id]})
+    files = opengwas_api("POST", "/gwasinfo/files", token, json={"id": dataset_id, "type": "vcf"})
 
     downloaded: list[str] = []
-    for payload in [files]:
-        urls = collect_urls(payload)
-        for url in sorted(set(urls)):
-            name = Path(url.split("?", 1)[0]).name
-            if any(token in name for token in [".vcf.gz", ".tbi", "report"]):
-                downloaded.append(str(download_url(url, out_dir, name)))
+    for url in collect_urls(files):
+        name = Path(url.split("?", 1)[0]).name
+        if any(token_str in name for token_str in [".vcf.gz", ".tbi"]):
+            downloaded.append(str(download_url(url, out_dir, name)))
 
     vcf = next((p for p in downloaded if p.endswith(".vcf.gz")), "")
     index = next((p for p in downloaded if p.endswith(".tbi")), "")
     if not vcf:
-        message = api_error(files) or json.dumps(files)[:500]
         raise SystemExit(
-            f"OpenGWAS did not provide a downloadable VCF for {dataset_id}. "
-            f"{message} Set OPENGWAS_JWT or provide a direct/local GWAS_location."
+            f"OpenGWAS returned no downloadable VCF for {dataset_id}: {json.dumps(files)[:300]}"
         )
     metadata = {
         "source_type": "opengwas",

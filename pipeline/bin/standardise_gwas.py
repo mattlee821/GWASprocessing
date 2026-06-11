@@ -42,7 +42,6 @@ from gwas_pipeline_common import (
     merge_dicts,
     normalize_chromosome,
     numeric_series,
-    p_to_logp,
     parse_bool,
     pick_existing_column,
     read_json,
@@ -69,6 +68,8 @@ CANONICAL_COLUMNS = [
     "P",
     "N",
 ]
+
+VCF_WRITE_CHUNK = 500_000
 
 
 def resolve_config_path(path_value: str, config: dict[str, Any]) -> Path:
@@ -405,10 +406,14 @@ def canonicalise_table(df: pd.DataFrame, record: dict[str, Any], config: dict[st
         alt_col = source_cols.get("ALT")
         ea_col = source_cols.get("EA")
         if ref_col and alt_col and ea_col:
-            ea = df[ea_col].astype(str).str.upper()
-            ref = df[ref_col].astype(str).str.upper()
-            alt = df[alt_col].astype(str).str.upper()
-            out["OA"] = np.where(ea == ref, alt, np.where(ea == alt, ref, out["OA"]))
+            ea_allele = df[ea_col].astype(str).str.upper()
+            ref_allele = df[ref_col].astype(str).str.upper()
+            alt_allele = df[alt_col].astype(str).str.upper()
+            out["OA"] = np.where(
+                ea_allele == ref_allele,
+                alt_allele,
+                np.where(ea_allele == alt_allele, ref_allele, out["OA"]),
+            )
             qc["derived_oa_from_ref_alt"] = True
 
     if transforms.get("uppercase_alleles", True):
@@ -444,8 +449,8 @@ def canonicalise_table(df: pd.DataFrame, record: dict[str, Any], config: dict[st
 
 
 def fill_from_reference(out: pd.DataFrame, ref: pd.DataFrame, population: str, qc: dict[str, Any]) -> pd.DataFrame:
+    # ref is already normalised by prepare_reference_for_merge in the caller.
     out = out.copy()
-    ref = prepare_reference_for_merge(ref, population)
     eaf_col = "REF_EAF" if "REF_EAF" in ref.columns else None
     keep = [c for c in ["SNP", "REF_SNPID", "REF_CHR", "REF_POS19", "REF_POS38", eaf_col] if c]
     if "SNP" not in ref.columns or not keep:
@@ -499,13 +504,6 @@ def fill_from_reference(out: pd.DataFrame, ref: pd.DataFrame, population: str, q
     return merged.drop(columns=drop_cols, errors="ignore")
 
 
-def allele(value: Any, fallback: str = "N") -> str:
-    text = str(value).strip().upper()
-    if not text or text in {"NAN", "NONE", "."}:
-        return fallback
-    return re.sub(r"[^ACGTN]", "N", text)
-
-
 def chrom_sort_value(chrom: Any) -> tuple[int, str]:
     text = normalize_chromosome(chrom)
     if pd.isna(text):
@@ -518,6 +516,73 @@ def chrom_sort_value(chrom: Any) -> tuple[int, str]:
         return (int(float(text)), text)
     except ValueError:
         return (999, text)
+
+
+def _vcf_float_series(series: pd.Series, index: pd.Index) -> pd.Series:
+    arr = pd.to_numeric(series, errors="coerce").to_numpy(dtype="float64")
+    out = np.full(arr.shape, ".", dtype=object)
+    finite = np.isfinite(arr)
+    out[finite] = [f"{value:.8g}" for value in arr[finite]]
+    return pd.Series(out, index=index)
+
+
+def _vcf_int_series(series: pd.Series, index: pd.Index) -> pd.Series:
+    arr = pd.to_numeric(series, errors="coerce").to_numpy(dtype="float64")
+    out = np.full(arr.shape, ".", dtype=object)
+    finite = np.isfinite(arr)
+    out[finite] = np.floor(arr[finite] + 0.5).astype("int64").astype(str)
+    return pd.Series(out, index=index)
+
+
+def _vcf_allele_series(series: pd.Series, fallback: str = "N") -> pd.Series:
+    alleles = series.astype("string").str.strip().str.upper()
+    invalid = alleles.isna() | alleles.isin(["", "NAN", "NONE", "."])
+    alleles = alleles.mask(invalid, fallback).str.replace(r"[^ACGTN]", "N", regex=True)
+    return alleles.astype(object)
+
+
+def build_vcf_lines(df: pd.DataFrame) -> pd.Series:
+    """Build VCF body lines as a vectorised string Series (one entry per variant)."""
+    index = df.index
+    chrom = df["CHR"].map(normalize_chromosome)
+    chrom = chrom.where(chrom.notna(), ".").astype(object)
+    pos = numeric_series(df["POS38"]).astype("int64").astype(str).astype(object)
+
+    snp = df["SNP"].astype("string").str.strip()
+    snp = snp.mask(snp.isna() | (snp.str.lower() == "nan") | (snp == ""), ".").astype(object)
+
+    ref = _vcf_allele_series(df["OA"])
+    alt = _vcf_allele_series(df["EA"])
+
+    pos19 = numeric_series(df["POS19"])
+    pos19_info = pd.Series("POS19=.", index=index, dtype=object)
+    has_pos19 = pos19.notna()
+    pos19_info[has_pos19] = "POS19=" + pos19[has_pos19].astype("int64").astype(str)
+
+    snpid = df["SNPID"]
+    snpid_info = pd.Series("SNPID=.", index=index, dtype=object)
+    has_snpid = snpid.notna()
+    snpid_info[has_snpid] = "SNPID=" + snpid[has_snpid].astype(str)
+
+    info = pos19_info + ";" + snpid_info + ";EAF_SOURCE=input"
+
+    p = pd.to_numeric(df["P"], errors="coerce").to_numpy(dtype="float64")
+    lp = np.full(p.shape, np.nan)
+    valid_p = np.isfinite(p) & (p > 0)
+    lp[valid_p] = -np.log10(p[valid_p])
+
+    sample = (
+        _vcf_float_series(df["BETA"], index) + ":"
+        + _vcf_float_series(df["SE"], index) + ":"
+        + _vcf_float_series(pd.Series(lp, index=index), index) + ":"
+        + _vcf_float_series(df["EAF"], index) + ":"
+        + _vcf_int_series(df["N"], index)
+    )
+
+    return (
+        chrom + "\t" + pos + "\t" + snp + "\t" + ref + "\t" + alt
+        + "\t.\tPASS\t" + info + "\tES:SE:LP:AF:SS\t" + sample
+    )
 
 
 def write_gwas_vcf(df: pd.DataFrame, path: Path, record: dict[str, Any], qc: dict[str, Any]) -> None:
@@ -545,51 +610,15 @@ def write_gwas_vcf(df: pd.DataFrame, path: Path, record: dict[str, Any], qc: dic
         "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO\tFORMAT\t" + str(sample),
     ]
 
+    lines = build_vcf_lines(df)
+
     plain_path = path.with_suffix("")
     handle_context = open(plain_path, "wt", encoding="utf-8") if command_exists("bgzip") else gzip.open(path, "wt", encoding="utf-8")
     with handle_context as handle:
         handle.write("\n".join(header) + "\n")
-        for _, row in df.iterrows():
-            chrom = normalize_chromosome(row["CHR"])
-            chrom = "." if pd.isna(chrom) else str(chrom)
-            pos38 = int(float(row["POS38"]))
-            snp = str(row.get("SNP", "."))
-            if not snp or snp.lower() == "nan":
-                snp = "."
-            ref = allele(row.get("OA"))
-            alt = allele(row.get("EA"))
-            lp = p_to_logp(row.get("P"))
-            eaf = row.get("EAF")
-            n = row.get("N")
-            info = [
-                f"POS19={int(float(row['POS19']))}" if pd.notna(row.get("POS19")) else "POS19=.",
-                f"SNPID={row.get('SNPID')}" if pd.notna(row.get("SNPID")) else "SNPID=.",
-                "EAF_SOURCE=input",
-            ]
-            fmt_values = [
-                format_float(row.get("BETA")),
-                format_float(row.get("SE")),
-                format_float(lp),
-                format_float(eaf),
-                format_integer(n),
-            ]
-            handle.write(
-                "\t".join(
-                    [
-                        chrom,
-                        str(pos38),
-                        snp,
-                        ref,
-                        alt,
-                        ".",
-                        "PASS",
-                        ";".join(info),
-                        "ES:SE:LP:AF:SS",
-                        ":".join(fmt_values),
-                    ]
-                )
-                + "\n"
-            )
+        for start in range(0, len(lines), VCF_WRITE_CHUNK):
+            handle.write("\n".join(lines.iloc[start:start + VCF_WRITE_CHUNK].tolist()))
+            handle.write("\n")
     if command_exists("bgzip"):
         with open(path, "wb") as out_handle:
             subprocess.run(["bgzip", "-c", str(plain_path)], check=True, stdout=out_handle)
@@ -657,16 +686,6 @@ def copy_vcf_with_metadata_headers(raw_path: Path, vcf_path: Path, record: dict[
         plain_path.unlink(missing_ok=True)
 
 
-def format_float(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "."
-    if not math.isfinite(number):
-        return "."
-    return f"{number:.8g}"
-
-
 def format_integer(value: Any) -> str:
     try:
         number = float(value)
@@ -686,6 +705,39 @@ def create_index(vcf_path: Path, index_path: Path, qc: dict[str, Any]) -> None:
     index_path.write_text("Placeholder index. Install bgzip/tabix to create a binary tabix index.\n", encoding="utf-8")
     qc["index_method"] = "placeholder"
     qc.setdefault("warnings", []).append("binary tabix index not created because bgzip/tabix is unavailable")
+
+
+def detect_vcf_build(path: str | Path) -> str:
+    """Return 'GRCh38'/'GRCh37' from a VCF header, or '' when it cannot be determined."""
+    opener = gzip.open if str(path).endswith(".gz") else open
+    assembly_text = ""
+    contig1_length: int | None = None
+    try:
+        with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if not line.startswith("#"):
+                    break
+                if line.startswith("##contig"):
+                    match = re.search(r"assembly=([^,>]+)", line, flags=re.I)
+                    if match and not assembly_text:
+                        assembly_text = match.group(1)
+                    length = re.search(r"ID=(?:chr)?1,[^>]*length=(\d+)", line, flags=re.I)
+                    if length and contig1_length is None:
+                        contig1_length = int(length.group(1))
+                elif line.startswith(("##reference", "##genomeBuild", "##genome_build", "##build")) and not assembly_text:
+                    assembly_text = line.split("=", 1)[-1].strip()
+    except OSError:
+        return ""
+    text = assembly_text.lower()
+    if any(token in text for token in ("grch38", "hg38", "ncbi38", "b38", "build38")):
+        return "GRCh38"
+    if any(token in text for token in ("grch37", "hg19", "ncbi37", "b37", "build37")):
+        return "GRCh37"
+    if contig1_length == 248956422:
+        return "GRCh38"
+    if contig1_length == 249250621:
+        return "GRCh37"
+    return ""
 
 
 def standardise_existing_vcf(raw_path: Path, output_prefix: Path, record: dict[str, Any], qc: dict[str, Any]) -> tuple[Path, Path]:
@@ -741,6 +793,12 @@ def main() -> None:
 
     if is_gwas_vcf(raw_path):
         standardise_existing_vcf(raw_path, output_prefix, record, qc)
+        # Passthrough VCFs keep their source coordinates; report the real build
+        # rather than assuming the GRCh38 produced by the table writer.
+        coordinate_build = detect_vcf_build(raw_path)
+        if not coordinate_build:
+            qc["warnings"].append("could not detect genome build from source VCF header; coordinate_build set to unknown")
+        qc["coordinate_build"] = coordinate_build or "unknown"
     else:
         delimiter = normalize_delimiter_value(config.get("delimiter"))
         df = read_table(raw_path, delimiter=delimiter)
@@ -749,6 +807,8 @@ def main() -> None:
         write_gwas_vcf(table, standard_vcf, record, qc)
         create_index(standard_vcf, standard_index, qc)
         qc["input_format"] = "table"
+        coordinate_build = "GRCh38"
+        qc["coordinate_build"] = coordinate_build
 
     metadata = {
         "study_id": record["study_id"],
@@ -762,7 +822,7 @@ def main() -> None:
         "source_type": record["source_type"],
         "GWAS_location": record["GWAS_location"],
         "standard_format": "GWAS-VCF",
-        "coordinate_build": "GRCh38",
+        "coordinate_build": coordinate_build,
         "raw_path": record["raw_path"],
     }
     qc["completed_at"] = utc_now()
