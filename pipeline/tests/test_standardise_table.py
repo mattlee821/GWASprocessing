@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from testlib import FIXTURES, ROOT, chain_block, make_reference, run_standardise, write_chain, write_table
+from testlib import EXAMPLES, ROOT, chain_block, make_reference, run_standardise, write_chain, write_table
 
 HEADER = ["CHR", "POS", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P", "N"]
 
@@ -21,7 +21,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
 
     def test_positional_match_supplies_rsid_and_effect_allele_frequency(self):
-        result = run_standardise(self.tmp, FIXTURES / "tables/snpid_missing_eaf.tsv", FIXTURES / "reference",
+        result = run_standardise(self.tmp, EXAMPLES / "tables/snpid_missing_eaf.tsv", EXAMPLES / "reference",
                                  ancestry="all", input_build="hg19")
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = result.rows
@@ -31,7 +31,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual((result.qc["reference_fills"]["rsid"], result.qc["reference_fills"]["EAF"]), (1, 1))
 
     def test_rsid_only_table_gets_coordinates_from_the_reference(self):
-        result = run_standardise(self.tmp, FIXTURES / "tables/locke_direct.tsv", FIXTURES / "reference", sex="female")
+        result = run_standardise(self.tmp, EXAMPLES / "tables/locke_direct.tsv", EXAMPLES / "reference", sex="female")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.qc["source_columns"]["EA"], "A1")
         self.assertEqual(result.qc["source_columns"]["OA"], "A2")
@@ -45,7 +45,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual((rs1["CHROM"], rs1["POS"], rs1["REF"], rs1["ALT"], rs1["INFO"]["POS19"]), ("1", 1100, "G", "A", "1000"))
 
     def test_plink_table_derives_other_allele_from_ref_and_alt(self):
-        result = run_standardise(self.tmp, FIXTURES / "tables/zhang_plink.tsv", FIXTURES / "reference",
+        result = run_standardise(self.tmp, EXAMPLES / "tables/zhang_plink.tsv", EXAMPLES / "reference",
                                  config_root=ROOT / "manifests", phenotype="protein", ancestry="EUR",
                                  author="Zhang", year="2022", PMID="35501419", study_id="zhang_2022_35501419")
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -57,7 +57,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual(result.qc["build_detection"]["build"], "hg38")
 
     def test_missing_ancestry_fails_loudly(self):
-        result = run_standardise(self.tmp, FIXTURES / "tables/generic.tsv", FIXTURES / "reference", ancestry="")
+        result = run_standardise(self.tmp, EXAMPLES / "tables/generic.tsv", EXAMPLES / "reference", ancestry="")
         self.assertEqual(result.returncode, 78)
         self.assertIn("ancestry", result.stderr.lower())
 
@@ -69,9 +69,9 @@ class AdaptedBehaviourTests(unittest.TestCase):
             [1, 4000, "rs4", "A", "G", 0.005, 0.1, 0.01, 0.2, 1000],
             [1, 1000, "rs5", "A", "G", 0.30, 0.1, 0.01, 0.2, 1000],
         ])
-        off = run_standardise(self.tmp, raw, FIXTURES / "reference", name="off")
+        off = run_standardise(self.tmp, raw, EXAMPLES / "reference", name="off")
         self.assertEqual(len(off.rows), 5)
-        on = run_standardise(self.tmp, raw, FIXTURES / "reference", analysis_qc=True, name="on")
+        on = run_standardise(self.tmp, raw, EXAMPLES / "reference", analysis_qc=True, name="on")
         self.assertEqual([r["ID"] for r in on.rows], ["rs1"])
         self.assertEqual(on.qc["qc_removed"], {"non_biallelic": 1, "palindromic": 1, "maf_below_0.01": 1, "duplicate": 1})
 

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import FIXTURES, PIPELINE, run_standardise
+from testlib import EXAMPLES, PIPELINE, run_standardise
 
 PY_AUDIT = PIPELINE / "tests" / "gwasvcf_guide_audit.py"
 R_AUDIT = PIPELINE / "tests" / "gwasvcf_guide_audit.R"
@@ -30,7 +30,7 @@ class AuditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp())
-        result = run_standardise(cls.tmp, FIXTURES / "tables/generic.tsv", FIXTURES / "reference")
+        result = run_standardise(cls.tmp, EXAMPLES / "tables/generic.tsv", EXAMPLES / "reference")
         assert result.returncode == 0, result.stderr
         cls.vcf = Path(result.record["standard_vcf"])
 

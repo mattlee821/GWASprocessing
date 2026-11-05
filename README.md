@@ -297,7 +297,7 @@ Run the test suite from the repository root:
 python3 -m unittest discover -s pipeline/tests -v
 ```
 
-The suite reads its test data from `pipeline/tests/fixtures/`, which is kept in the project folder and not in git, so a fresh clone has to get that folder from an existing copy. The suite needs the packages in `requirements.txt` and bgzip/tabix on `PATH`. The writer tests also use `bcftools`, the integration test needs `nextflow` and Java, and the R audit test needs R with the `gwasvcf` package; tests whose tools are missing are skipped. Tests never use the network: downloads run against local HTTP servers that mimic the GWAS Catalog FTP and OpenGWAS API, every non-local request is routed to a dead proxy, and shell scripts run with stubbed `wget`, `curl` and package managers.
+The suite reads its small synthetic example data from `pipeline/tests/examples/`. The suite needs the packages in `requirements.txt` and bgzip/tabix on `PATH`. The writer tests also use `bcftools`, the integration test needs `nextflow` and Java, and the R audit test needs R with the `gwasvcf` package; tests whose tools are missing are skipped. Tests never use the network: downloads run against local HTTP servers that mimic the GWAS Catalog FTP and OpenGWAS API, every non-local request is routed to a dead proxy, and shell scripts run with stubbed `wget`, `curl` and package managers.
 
 | Test file | Component |
 |---|---|

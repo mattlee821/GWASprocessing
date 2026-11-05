@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import FIXTURES, LocalHttpServer, run_script, write_stub
+from testlib import EXAMPLES, LocalHttpServer, run_script, write_stub
 
 
 class StageSourceTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class StageSourceTests(unittest.TestCase):
     def stage(self, row_json, *extra, env=None, check=True):
         out = self.tmp / "stage_record.json"
         proc = run_script("stage_source.py", "--row-json", row_json, "--config-root", self.tmp, "--reference-root",
-                          FIXTURES / "reference", "--output", out, *extra, env=env, check=check)
+                          EXAMPLES / "reference", "--output", out, *extra, env=env, check=check)
         return proc, (json.loads(out.read_text(encoding="utf-8")) if out.exists() else None)
 
     def test_local_file_is_copied_and_refreshed_when_the_source_changes(self):
@@ -43,10 +43,10 @@ class StageSourceTests(unittest.TestCase):
     def test_direct_url_is_downloaded(self):
         served = self.tmp / "served"
         served.mkdir()
-        shutil.copy(FIXTURES / "tables/generic.tsv", served / "generic.tsv")
+        shutil.copy(EXAMPLES / "tables/generic.tsv", served / "generic.tsv")
         with LocalHttpServer(served) as server:
             _, record = self.stage(self.row(f"{server.url}/generic.tsv", "direct_url"))
-        self.assertEqual(Path(record["raw_path"]).read_bytes(), (FIXTURES / "tables/generic.tsv").read_bytes())
+        self.assertEqual(Path(record["raw_path"]).read_bytes(), (EXAMPLES / "tables/generic.tsv").read_bytes())
 
     def test_s3_and_gs_sources_use_the_cloud_cli(self):
         bin_dir = self.tmp / "bin"

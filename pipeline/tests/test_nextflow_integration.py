@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import FIXTURES, SRC, read_vcf_text, write_table
+from testlib import EXAMPLES, SRC, read_vcf_text, write_table
 
 import gwas_pipeline_common as common
 
@@ -25,7 +25,7 @@ class NextflowIntegrationTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         manifests = self.tmp / "manifests"
         manifests.mkdir()
-        good = shutil.copy(FIXTURES / "tables/generic.tsv", self.tmp / "good.tsv")
+        good = shutil.copy(EXAMPLES / "tables/generic.tsv", self.tmp / "good.tsv")
         bad = write_table(self.tmp / "bad.tsv", ["CHR", "POS", "SNP", "EA", "OA", "Estimate", "SE", "P"],
                           [[1, 1000, "rs1", "A", "G", 0.1, 0.02, 1e-6]])
         self.manifest = manifests / "manifest.tsv"
@@ -38,7 +38,7 @@ class NextflowIntegrationTests(unittest.TestCase):
         self.env = {
             **os.environ,
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
-            "GWAS_WORK_ROOT": str(self.tmp / "GWAS"), "GWAS_REFERENCE_ROOT": str(FIXTURES / "reference"),
+            "GWAS_WORK_ROOT": str(self.tmp / "GWAS"), "GWAS_REFERENCE_ROOT": str(EXAMPLES / "reference"),
             "GWAS_CONFIG_ROOT": str(manifests), "GWAS_TEMP_ROOT": str(self.tmp / "temp"),
             "GWAS_LOG_ROOT": str(self.tmp / "temp" / "logs"), "GWAS_NEXTFLOW_WORK": str(self.tmp / "work"),
             "GWAS_NEXTFLOW_LOG": str(self.tmp / "temp" / ".nextflow.log"), "GWAS_QCPLOT": "true", "NXF_ANSI_LOG": "false",

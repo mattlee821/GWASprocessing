@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import FIXTURES, chain_block, make_reference, run_standardise, write_chain, write_lookup
+from testlib import EXAMPLES, chain_block, make_reference, run_standardise, write_chain, write_lookup
 
 import standardise_gwas
 
@@ -32,7 +32,9 @@ class AdaptedPassthroughTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
 
     def test_existing_gwas_vcf_gets_manifest_sex_metadata_and_detected_build(self):
-        result = run_standardise(self.tmp, FIXTURES / "tables/existing_gwas.vcf", FIXTURES / "reference", sex="male", ancestry="EUR")
+        raw = write_vcf(self.tmp / "existing_gwas.vcf", [(1, 1000, "rs1", "G", "A", "0.2:0.05:3:0.1:1000", "POS19=900;SNPID=1:1000")],
+                        contig=None, extra_header=["##source=test"])
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", sex="male", ancestry="EUR")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.metadata["sex"], "male")
         self.assertIn("##sex=male", result.header)
@@ -58,7 +60,7 @@ class AdaptedPassthroughTests(unittest.TestCase):
                                                         ("1", 2000, "rsA", "C", "T", "0.01:0.01:1:0.3:1000"),
                                                         ("1", 9000, "rsC", "G", "A", "0.03:0.01:1:0.3:1000")],
                         contig="##contig=<ID=1,length=248956422,assembly=GRCh38>")
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference")
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([r["POS"] for r in result.rows], [2000, 5000, 9000])
         self.assertEqual(result.rows[0]["INFO"]["POS19"], "1900")
@@ -90,7 +92,7 @@ class PassthroughRegressionTests(unittest.TestCase):
     def test_chr_prefixed_grch37_contigs_are_renamed_and_lifted(self):
         raw = write_vcf(self.tmp / "chr.gwas.vcf", [("chr1", 1000, "rs1", "G", "A", "0.1:0.02:6:0.3:5000")],
                         contig="##contig=<ID=chr1,length=249250621,assembly=GRCh37>")
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference")
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = result.rows[0]
         self.assertEqual((row["CHROM"], row["POS"], row["INFO"]["POS19"]), ("1", 1100, "1000"))
@@ -98,7 +100,7 @@ class PassthroughRegressionTests(unittest.TestCase):
     def test_chr_prefixed_grch38_contigs_are_renamed(self):
         raw = write_vcf(self.tmp / "chr38.gwas.vcf", [("chr1", 2000, "rs2", "C", "T", "0.1:0.02:6:0.3:5000")],
                         contig="##contig=<ID=chr1,length=248956422,assembly=GRCh38>")
-        row = run_standardise(self.tmp, raw, FIXTURES / "reference").rows[0]
+        row = run_standardise(self.tmp, raw, EXAMPLES / "reference").rows[0]
         self.assertEqual((row["CHROM"], row["POS"], row["INFO"]["POS19"]), ("1", 2000, "1900"))
 
     def test_minus_strand_liftover_complements_ref_and_alt(self):
@@ -115,7 +117,7 @@ class PassthroughRegressionTests(unittest.TestCase):
                    '##FORMAT=<ID=ID,Number=1,Type=String,Description="Study variant identifier">']
         raw = write_vcf(self.tmp / "noss.gwas.vcf", [("1", 1000, "rs1", "G", "A", "0.1:0.02:6:0.3:rs1")], fmt="ES:SE:LP:AF:ID",
                         formats=formats, sample="ieu-b-1")
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference", source_type="opengwas",
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", source_type="opengwas",
                                  metadata={"gwasinfo": [{"id": "ieu-b-1", "sample_size": 46468, "build": "HG19/GRCh37"}]})
         self.assertEqual(result.returncode, 0, result.stderr)
         row = result.rows[0]
@@ -130,7 +132,7 @@ class PassthroughRegressionTests(unittest.TestCase):
                         fmt="ES:SE:LP:AF:ID")
         text = raw.read_text(encoding="utf-8").replace("ES:SE:LP:AF:ID\t0.1:0.02:6:0.3:777:rs2", "ES:SE:LP:AF:SS:ID\t0.1:0.02:6:0.3:777:rs2")
         raw.write_text(text, encoding="utf-8")
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference", source_type="opengwas",
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", source_type="opengwas",
                                  metadata={"gwasinfo": [{"id": "ieu-b-1", "sample_size": 46468}]})
         self.assertEqual(result.returncode, 0, result.stderr)
         sizes = {r["ID"]: r["FORMAT"].get("SS") for r in result.rows}
@@ -141,7 +143,7 @@ class PassthroughRegressionTests(unittest.TestCase):
     def test_source_build_headers_are_replaced_by_grch38_declarations(self):
         raw = write_vcf(self.tmp / "b37.gwas.vcf", [("1", 1000, "rs1", "G", "A", "0.1:0.02:6:0.3:5000")],
                         extra_header=["##reference=file:///data/b37/human_g1k_v37.fasta", "##study_id=stale", "##ancestry=stale"])
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference")
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([h for h in result.header if h.startswith("##reference")], ["##reference=GRCh38"])
         self.assertFalse(any("GRCh37" in h for h in result.header if h.startswith("##contig")))
@@ -151,7 +153,7 @@ class PassthroughRegressionTests(unittest.TestCase):
 
     def test_undeclared_build_that_cannot_be_detected_fails_loudly(self):
         raw = write_vcf(self.tmp / "nobuild.gwas.vcf", [("1", 123457, "rsX", "G", "A", "0.1:0.02:6:0.3:5000")], contig="")
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference")
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 78)
         self.assertIn("input_build", result.stderr)
 
@@ -175,7 +177,7 @@ class PassthroughRegressionTests(unittest.TestCase):
 
     def test_no_liftable_records_is_a_data_error(self):
         raw = write_vcf(self.tmp / "far.gwas.vcf", [("1", 5_000_000, "rs1", "G", "A", "0.1:0.02:6:0.3:5000")])
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference")
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 65)
         self.assertIn("no variants", result.stderr.lower())
 
@@ -184,7 +186,7 @@ class PassthroughRegressionTests(unittest.TestCase):
         raw = write_vcf(self.tmp / "lambda.gwas.vcf", [("1", 1000 + i, f"rs{i}", "G", "A", f"0.1:0.02:{lp}:0.3:5000")
                                                       for i, lp in enumerate([2, 1.30103, 0.69897])],
                         contig="##contig=<ID=1,length=248956422,assembly=GRCh38>")
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference")
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertAlmostEqual(result.qc["lambda_gc"], 8.44394650653, places=3)
 
     def test_duplicates_spanning_a_chunk_boundary_are_removed(self):
@@ -194,7 +196,7 @@ class PassthroughRegressionTests(unittest.TestCase):
             ("1", 2000, "rs2", "T", "C", "-0.1:0.02:6:0.7:5000"), ("1", 3000, "rs3", "G", "A", "0.1:0.02:6:0.3:5000")],
             contig="##contig=<ID=1,length=248956422,assembly=GRCh38>")
         env = {**os.environ, "GWAS_PASSTHROUGH_CHUNK": "2"}
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference", analysis_qc=True, env=env)
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", analysis_qc=True, env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([(r["POS"], r["REF"], r["ALT"]) for r in result.rows], [(1000, "A", "G"), (2000, "C", "T"), (3000, "G", "A")])
         self.assertEqual(result.qc["qc_removed"]["duplicate"], 1)
@@ -216,7 +218,7 @@ class PassthroughRegressionTests(unittest.TestCase):
         scratch = self.tmp / "scratch"
         scratch.mkdir()
         raw = write_vcf(self.tmp / "clean.gwas.vcf", [("1", 1000, "rs1", "G", "A", "0.1:0.02:6:0.3:5000")])
-        result = run_standardise(self.tmp, raw, FIXTURES / "reference", analysis_qc=True, env={**os.environ, "GWAS_TMPDIR": str(scratch)})
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", analysis_qc=True, env={**os.environ, "GWAS_TMPDIR": str(scratch)})
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = sorted(p.name for p in Path(result.record["standard_vcf"]).parent.iterdir())
         self.assertEqual(outputs, ["standardised.gwas.vcf.gz", "standardised.gwas.vcf.gz.tbi", "standardised.metadata.json",

@@ -1,4 +1,4 @@
-"""Shared fixture builders for the GWASprocessing test suite.
+"""Shared helpers for the GWASprocessing test suite.
 
 Usage (from the repo root):
     python3 -m unittest discover -s pipeline/tests -v
@@ -20,7 +20,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[2]
 PIPELINE = ROOT / "pipeline"
 BIN = PIPELINE / "bin"
-FIXTURES = PIPELINE / "tests" / "fixtures"
+EXAMPLES = PIPELINE / "tests" / "examples"
 SRC = ROOT / "src"
 
 if str(BIN) not in sys.path:
@@ -35,7 +35,7 @@ os.environ.setdefault("NXF_OFFLINE", "true")
 
 LOOKUP_COLUMNS = ["CHR", "SNP", "POS19", "A1", "A2", "AF1"]
 
-# Fixture liftover: on chromosomes 1 and 2, GRCh38 = GRCh37 + 100 for positions 1..1,000,000.
+# Example liftover: on chromosomes 1 and 2, GRCh38 = GRCh37 + 100 for positions 1..1,000,000.
 CHAIN_OFFSET = 100
 
 

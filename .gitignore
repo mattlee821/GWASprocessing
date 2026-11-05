@@ -11,9 +11,6 @@ work/
 .nextflow.log*
 slurm-*.out
 
-# Test data stays out of git
-pipeline/tests/fixtures/
-
 # Older work kept beside a checkout
 deprecated/
 
