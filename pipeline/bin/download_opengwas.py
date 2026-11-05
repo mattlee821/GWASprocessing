@@ -12,15 +12,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import sys
 from pathlib import Path
 
 import requests
 
-from gwas_pipeline_common import download_url, ensure_dir, write_json
+from gwas_pipeline_common import download_url, ensure_dir, opengwas_dataset_id, write_json
 
-API_ROOT = "https://api.opengwas.io/api"
+DEFAULT_API_ROOT = "https://api.opengwas.io/api"
 # sysexits.h EX_CONFIG: a configuration/authentication error the user must fix.
 # The Nextflow errorStrategy terminates the whole run on this code (rather than
 # ignoring the row) so the prompt to supply a valid token is not missed.
@@ -36,11 +35,17 @@ def config_error(message: str) -> "SystemExit":
     return SystemExit(EXIT_CONFIG)
 
 
+def api_root() -> str:
+    """OpenGWAS API root; OPENGWAS_API_ROOT points it at a mirror (or a test server)."""
+    return os.environ.get("OPENGWAS_API_ROOT", DEFAULT_API_ROOT).rstrip("/")
+
+
 def opengwas_id(location: str) -> str:
-    match = re.search(r"([a-z]+-[a-z]-\d+)", location, flags=re.I)
-    if not match:
-        raise ValueError(f"Could not find OpenGWAS dataset ID in: {location}")
-    return match.group(1).lower()
+    """Dataset ID such as ieu-b-5129, ukb-d-30780_irnt or ebi-a-GCST90000123, with its case preserved."""
+    dataset = opengwas_dataset_id(location)
+    if not dataset:
+        raise config_error(f"Could not find an OpenGWAS dataset ID in: {location}")
+    return dataset
 
 
 def collect_urls(payload) -> list[str]:
@@ -69,7 +74,7 @@ def opengwas_jwt() -> str:
 def opengwas_api(method: str, path: str, token: str, **kwargs) -> dict | list:
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     try:
-        response = requests.request(method, f"{API_ROOT}{path}", headers=headers, timeout=120, **kwargs)
+        response = requests.request(method, f"{api_root()}{path}", headers=headers, timeout=120, **kwargs)
     except requests.RequestException as exc:
         raise SystemExit(f"OpenGWAS API request failed ({method} {path}): {exc}") from exc
     if response.status_code in (401, 403):

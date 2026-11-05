@@ -22,6 +22,5 @@ joins:
     how: left
 transforms:
   uppercase_alleles: true
-  strip_chr_prefix: true
 extras:
   - minus_log10_pval

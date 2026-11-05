@@ -6,15 +6,33 @@ from __future__ import annotations
 import argparse
 import gzip
 import hashlib
-import json
 import re
 import urllib.parse
 from pathlib import Path
 
+import os
+
+import yaml
+
 from gwas_pipeline_common import download_url, ensure_dir, url_links, write_json
 
 
-FTP_ROOT = "https://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics"
+DEFAULT_FTP_ROOT = "https://ftp.ebi.ac.uk/pub/databases/gwas/summary_statistics"
+
+
+def ftp_root() -> str:
+    """GWAS Catalog summary-statistics root; GWAS_CATALOG_FTP_ROOT points it at a mirror (or a test server)."""
+    return os.environ.get("GWAS_CATALOG_FTP_ROOT", DEFAULT_FTP_ROOT).rstrip("/")
+
+
+def harmonised_metadata(summary_url: str, out_dir: Path) -> dict:
+    """Read the GWAS-SSF '<file>-meta.yaml' sidecar when the Catalog provides one (genome build etc.)."""
+    try:
+        path = download_url(f"{summary_url}-meta.yaml", out_dir, retries=1, timeout=60)
+        data = yaml.safe_load(path.read_text(encoding="utf-8", errors="replace")) or {}
+    except Exception:  # noqa: BLE001 - the sidecar is optional
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def accession_from_location(location: str) -> str:
@@ -124,9 +142,10 @@ def verify_gzip(path: Path) -> dict[str, str | bool]:
 def download_gwas_catalog(location: str, out_dir: str | Path, pmid: str = "") -> dict:
     out_dir = ensure_dir(out_dir)
     accession = accession_from_location(location)
-    study_url = f"{FTP_ROOT}/{accession_range(accession)}/{accession}/"
+    study_url = f"{ftp_root()}/{accession_range(accession)}/{accession}/"
     summary_url = choose_summary_file(study_url, accession, pmid)
     summary = download_url(summary_url, out_dir)
+    sidecar_metadata = harmonised_metadata(summary_url, out_dir)
     sidecars = download_sidecars(study_url, out_dir)
     md5_result = verify_md5(summary, sidecars)
     if md5_result.get("checked") and not md5_result.get("ok"):
@@ -153,6 +172,7 @@ def download_gwas_catalog(location: str, out_dir: str | Path, pmid: str = "") ->
         "sidecars": sidecars,
         "md5": md5_result,
         "gzip": gzip_result,
+        "genome_assembly": str(sidecar_metadata.get("genome_assembly", "") or ""),
     }
     write_json(out_dir / f"{accession}.gwas_catalog_metadata.json", metadata)
     return metadata

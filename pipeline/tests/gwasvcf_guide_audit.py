@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Audit a GWAS-VCF and export the guide-style flat GWAS columns."""
+"""Audit a GWAS-VCF and export the guide-style flat GWAS columns.
+
+Usage: python3 pipeline/tests/gwasvcf_guide_audit.py [VCF] [OUTPUT_TSV]
+Fails when a record lacks FORMAT ES, SE, LP or SS, or a required value is missing.
+"""
 
 from __future__ import annotations
 
@@ -83,7 +87,7 @@ def read_flat_records(vcf_path: Path) -> tuple[list[str], list[dict[str, object]
             if missing_format:
                 raise ValueError(f"VCF record missing FORMAT keys: {', '.join(missing_format)}")
             values = fields[9].split(":")
-            format_map = dict(zip(format_keys, values, strict=False))
+            format_map = dict(zip(format_keys, values))  # Python 3.9 compatible (no strict=)
             lp = parse_float(format_map.get("LP", "."))
             records.append(
                 {
