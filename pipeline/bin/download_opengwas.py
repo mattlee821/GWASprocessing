@@ -25,7 +25,7 @@ DEFAULT_API_ROOT = "https://api.opengwas.io/api"
 # ignoring the row) so the prompt to supply a valid token is not missed.
 EXIT_CONFIG = 78
 TOKEN_HELP = (
-    "Provide a valid token in the .env file as OPENGWAS_JWT=<token>. "
+    "Provide a valid token in server.env as OPENGWAS_JWT=<token>. "
     "Generate or renew one at https://api.opengwas.io/profile/ ."
 )
 

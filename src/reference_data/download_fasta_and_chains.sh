@@ -3,7 +3,7 @@
 # Usage: bash src/reference_data/download_fasta_and_chains.sh
 # The FASTA is decompressed to genome/GRCh38.fa and indexed (GRCh38.fa.fai) so standardisation can align
 # REF/ALT to the GRCh38 reference. Override the sources with HG19_TO_HG38_CHAIN_URL, HG38_TO_HG19_CHAIN_URL
-# and FASTA_GRCH38_URL in .env. Idempotent: existing files are skipped.
+# and FASTA_GRCH38_URL in server.env. Idempotent: existing files are skipped.
 set -euo pipefail
 # shellcheck source=src/reference_data/common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"

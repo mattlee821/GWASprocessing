@@ -12,7 +12,7 @@ PROCESSED="${GWAS_REFERENCE_ROOT}/1000genomes/phase3/processed"
 mkdir -p "${PROCESSED}"
 PLINK2="${PLINK2:-plink2}"
 if ! command -v "${PLINK2}" >/dev/null 2>&1; then
-  echo "plink2 not found. Run 'bash src/source.sh --tools-only' first, or set PLINK2=/path/to/plink2 in .env" >&2
+  echo "plink2 not found. Run 'bash src/source.sh --tools-only' first, or set PLINK2=/path/to/plink2 in server.env" >&2
   exit 1
 fi
 

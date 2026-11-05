@@ -168,12 +168,15 @@ class SetupScriptTests(unittest.TestCase):
         self.repo = fake_repo(self.tmp, dotenv="EXISTING=1\nGWAS_WORK_ROOT=GWAS\n")
 
     def test_set_env_var_adds_and_replaces_keys_without_touching_other_lines(self):
+        (self.repo / "server.env").write_text("EXISTING=1\nGWAS_WORK_ROOT=GWAS\n", encoding="utf-8")
+        dotenv = (self.repo / ".env").read_text(encoding="utf-8")
         script = (f'source "{self.repo / "src" / "source.sh"}"; set_env_var NEW_KEY first; '
                   'set_env_var NEW_KEY "second=value"; set_env_var GWAS_WORK_ROOT /data/GWAS')
         proc = subprocess.run([BASH, "-c", script], capture_output=True, text=True, cwd=self.tmp, env=sandbox_env(self.tmp), timeout=60)
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual((self.repo / ".env").read_text(encoding="utf-8").splitlines(),
+        self.assertEqual((self.repo / "server.env").read_text(encoding="utf-8").splitlines(),
                          ["EXISTING=1", "GWAS_WORK_ROOT=/data/GWAS", "NEW_KEY=second=value"])
+        self.assertEqual((self.repo / ".env").read_text(encoding="utf-8"), dotenv)
 
     def test_unknown_option_is_rejected(self):
         proc = subprocess.run([BASH, str(self.repo / "src" / "source.sh"), "--bogus"], capture_output=True, text=True,

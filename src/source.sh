@@ -8,18 +8,18 @@
 #   bash src/source.sh --force          # rebuild lookup tables and the rsID coordinate index
 #
 # Idempotent: every step skips work whose output already exists, so it is safe to re-run after an
-# interruption. Tool locations (PLINK2, NEXTFLOW, GWAS_VENV) are written to .env, which
+# interruption. Tool locations (PLINK2, NEXTFLOW, GWAS_VENV) are written to server.env, which
 # src/standardise.sh reads. Run it with bash; sourcing it only defines its functions.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REFDATA="${ROOT_DIR}/src/reference_data"
 TOOLS_DIR="${ROOT_DIR}/.tools/bin"
-ENV_FILE="${ROOT_DIR}/.env"
+ENV_FILE="${ROOT_DIR}/server.env"
 REQUIRED_MODULES="numpy, pandas, yaml, requests, matplotlib, pyliftover, certifi"
 # shellcheck source=src/lib/env.sh
 . "${ROOT_DIR}/src/lib/env.sh"
 
-# set_env_var KEY VALUE: create or replace KEY=VALUE in .env (other lines untouched) and export it.
+# set_env_var KEY VALUE: create or replace KEY=VALUE in server.env (other lines untouched) and export it.
 set_env_var() {
   local key="$1" value="$2" tmp line found=0
   [[ -f "${ENV_FILE}" ]] || : > "${ENV_FILE}"
@@ -50,7 +50,7 @@ install_plink2() {
     Darwin-x86_64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_mac_avx2_20260504.zip}" ;;
     Linux-x86_64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_avx2_20260504.zip}" ;;
     Linux-aarch64|Linux-arm64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_arm64_20260504.zip}" ;;
-    *) echo "No known plink2 build for $(uname -s)-$(uname -m). Set PLINK2=/path/to/plink2 in .env." >&2; return 1 ;;
+    *) echo "No known plink2 build for $(uname -s)-$(uname -m). Set PLINK2=/path/to/plink2 in server.env." >&2; return 1 ;;
   esac
   echo "plink2: installing from ${url}"
   mkdir -p "${TOOLS_DIR}"
@@ -151,7 +151,7 @@ main() {
       *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
     esac
   done
-  load_env_defaults "${ENV_FILE}"
+  load_settings "${ROOT_DIR}"
   echo "== GWASprocessing setup =="
   if [[ "${REFERENCE_ONLY}" -eq 0 ]]; then
     echo "-- Tools --"

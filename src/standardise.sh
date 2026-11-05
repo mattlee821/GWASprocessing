@@ -8,7 +8,7 @@
 #
 # Usage: bash src/standardise.sh [options]      (from any directory)
 #        sbatch src/standardise.sh [options]    (submit from the repository root; uses the slurm profile)
-# Settings come from command-line options, then environment variables, then .env (see .env.example).
+# Settings come from command-line options, then environment variables, then server.env, then .env.
 # Exit status: Nextflow's status if it failed, 1 if any manifest row failed, otherwise 0.
 
 set -euo pipefail
@@ -56,7 +56,7 @@ Options:
                         positional de-duplication) before writing. Default: false.
   -h, --help            Show this help.
 
-Environment (or .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
+Environment (or server.env, then .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
 GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_QCPLOT, GWAS_ANALYSIS_QC, GWAS_ROW_LIMIT,
 GWAS_VENV (Python virtual environment to put first on PATH), NEXTFLOW (path to the nextflow launcher).
 USAGE
@@ -65,7 +65,7 @@ USAGE
 ROOT_DIR="$(find_root)"
 # shellcheck source=src/lib/env.sh
 . "${ROOT_DIR}/src/lib/env.sh"
-load_env_defaults "${ROOT_DIR}/.env"
+load_settings "${ROOT_DIR}"
 
 resolve_path() {
   local value="$1"
@@ -143,6 +143,9 @@ NEXTFLOW_LOG="$(resolve_path "${NEXTFLOW_LOG}")"
 if [[ -n "${STUDY_YAML}" ]]; then
   STUDY_YAML="$(resolve_path "${STUDY_YAML}")"
 fi
+for name in WORK_ROOT REFERENCE_ROOT TEMP_ROOT LOG_ROOT NEXTFLOW_WORK NEXTFLOW_LOG; do
+  require_real_path "GWAS_${name}" "${!name}"
+done
 
 for path in "${WORK_ROOT}" "${REFERENCE_ROOT}" "${TEMP_ROOT}" "${NEXTFLOW_WORK}"; do
   case "${path}" in
@@ -170,7 +173,7 @@ elif command -v nextflow >/dev/null 2>&1; then
 elif [[ -x "${ROOT_DIR}/.tools/bin/nextflow" ]]; then
   NEXTFLOW_BIN="${ROOT_DIR}/.tools/bin/nextflow"
 else
-  echo "nextflow not found. Run 'bash src/source.sh --tools-only' or set NEXTFLOW=/path/to/nextflow in .env" >&2
+  echo "nextflow not found. Run 'bash src/source.sh --tools-only' or set NEXTFLOW=/path/to/nextflow in server.env" >&2
   exit 2
 fi
 

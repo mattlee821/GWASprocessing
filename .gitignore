@@ -1,0 +1,32 @@
+# Real settings; the tracked .env holds placeholders
+server.env
+
+# Data, references and run outputs: never commit. They live outside the repository, at the paths in server.env
+data/
+GWAS/
+references/
+temp/
+work/
+.nextflow/
+.nextflow.log*
+slurm-*.out
+
+# Test data stays out of git
+pipeline/tests/fixtures/
+
+# Older work kept beside a checkout
+deprecated/
+
+# Tools and environments installed by src/source.sh
+.tools/
+.venv/
+
+# Python, R and OS clutter
+__pycache__/
+*.pyc
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+._*

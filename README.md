@@ -7,23 +7,39 @@ GWASprocessing is a manifest-driven Nextflow workflow that stages GWAS summary s
 - `src/` contains the user-facing scripts: `src/source.sh` installs tools and builds the reference data, `src/standardise.sh` runs the workflow (`bash src/standardise.sh`, or `sbatch src/standardise.sh` from the repository root), and `src/reference_data/` holds the individual reference-data steps.
 - `pipeline/` contains the Nextflow workflow (`main.nf`), its profiles (`conf/`), the Python steps (`bin/`) and the test suite (`tests/`).
 - `manifests/` contains persistent input manifests and optional study YAML overrides.
-- `references/` is the default root for reference data written by `src/reference_data/`.
-- `GWAS/<STUDY>/raw/<SOURCE_ID>/` receives staged raw GWAS files.
+- `.env` lists every setting with `/WHERE/...` placeholder paths. It is tracked and stays fixed.
+- `server.env` holds your real settings. It is not tracked.
+
+The data are large and stay outside the repository, in the folders the settings point to. Below, `references/`, `GWAS/` and `temp/` stand for those folders:
+
+- `references/` (`GWAS_REFERENCE_ROOT`) receives the reference data written by `src/reference_data/`.
+- `GWAS/<STUDY>/raw/<SOURCE_ID>/` (`GWAS_WORK_ROOT`) receives staged raw GWAS files.
 - `GWAS/<STUDY>/standardise/<SOURCE_ID>/` receives the standardised GWAS-VCF, its tabix index, metadata and QC JSON, and the QC plot.
-- `temp/` contains Nextflow runtime metadata, `.nextflow/`, `.nextflow.log*`, work directories and run logs.
-- `deprecated/` contains legacy one-off scripts and study directories. It is intentionally not tracked.
+- `temp/` (`GWAS_TEMP_ROOT`) contains Nextflow runtime metadata, `.nextflow/`, `.nextflow.log*`, work directories and run logs.
 
 ## Quick Start
 
-### 1: `.env`, tools and `references/`
+### 1: settings, tools and `references/`
 
-Copy [.env.example](.env.example) to `.env` and set paths and tokens. Values in `.env` are defaults: variables already set in the environment, and command-line options, take precedence.
+Create `server.env` in the repository root and set the paths in it, using the names in [.env](.env):
+
+```bash
+GWAS_WORK_ROOT=/WHERE/THE/GWAS/FILES/GO
+GWAS_REFERENCE_ROOT=/WHERE/THE/REFERENCE/DATA/IS
+GWAS_TEMP_ROOT=/WHERE/THE/TEMP/FILES/GO
+GWAS_LOG_ROOT=/WHERE/THE/TEMP/FILES/GO/logs
+GWAS_NEXTFLOW_WORK=/WHERE/THE/TEMP/FILES/GO/nextflow_work
+GWAS_NEXTFLOW_LOG=/WHERE/THE/TEMP/FILES/GO/.nextflow.log
+OPENGWAS_JWT=your-token
+```
+
+The scripts read `server.env` first and then `.env`, so `server.env` needs only the lines you change, and a run stops with a message while a path is still a placeholder. Variables already set in the environment, and command-line options, take precedence over both files. Do not edit `.env`: it stays fixed so that `git pull` always works, and new settings get a default in the scripts instead.
 
 Keep `GWAS_WORK_ROOT`, `GWAS_REFERENCE_ROOT`, `GWAS_TEMP_ROOT` and `GWAS_NEXTFLOW_WORK` on local or scratch storage. In a cloud-synced folder (OneDrive, Dropbox, iCloud) every output is uploaded and cloud-only reference files are downloaded again on each run; `src/standardise.sh` prints a warning when it detects this.
 
-OpenGWAS sources require authentication. Set `OPENGWAS_JWT` in `.env` to a valid token (generate or renew one at [https://api.opengwas.io/profile/](https://api.opengwas.io/profile/)). If the token is missing or rejected (expired or invalid), the run stops with exit code 78 and a message asking for a valid token, rather than silently skipping the row. Manifests without OpenGWAS sources do not need a token.
+OpenGWAS sources require authentication. Set `OPENGWAS_JWT` in `server.env` to a valid token (generate or renew one at [https://api.opengwas.io/profile/](https://api.opengwas.io/profile/)). If the token is missing or rejected (expired or invalid), the run stops with exit code 78 and a message asking for a valid token, rather than silently skipping the row. Manifests without OpenGWAS sources do not need a token.
 
-Run `bash src/source.sh` to install the tools (plink2, Nextflow, bgzip/tabix and the Python packages) and build the reference data end to end. This is the recommended way to set up the project on a new machine, including the server it will eventually run on. It is idempotent: every step skips work whose output already exists, so it is safe to re-run at any time, including after an interrupted run. The locations of tools it installs are written to `.env` (`PLINK2`, `NEXTFLOW`, `GWAS_VENV`) and picked up by `src/standardise.sh`. If the system Python refuses package installs (PEP 668), the packages go into a project virtual environment, `.venv`, which `src/standardise.sh` puts first on `PATH`.
+Run `bash src/source.sh` to install the tools (plink2, Nextflow, bgzip/tabix and the Python packages) and build the reference data end to end. This is the recommended way to set up the project on a new machine, including the server it will eventually run on. It is idempotent: every step skips work whose output already exists, so it is safe to re-run at any time, including after an interrupted run. The locations of tools it installs are written to `server.env` (`PLINK2`, `NEXTFLOW`, `GWAS_VENV`) and picked up by `src/standardise.sh`. If the system Python refuses package installs (PEP 668), the packages go into a project virtual environment, `.venv`, which `src/standardise.sh` puts first on `PATH`.
 
 ```bash
 bash src/source.sh                  # install tools, then build all reference data
@@ -41,7 +57,7 @@ The reference build downloads the 1000 Genomes phase 3 dataset (about 4 GB compr
 | `genome/hg19ToHg38.over.chain.gz`, `genome/hg38ToHg19.over.chain.gz` | UCSC liftover chains for the dual-build coordinates. |
 | `genome/GRCh38.fa` (+ `.fai`) | GRCh38 primary assembly, used to make `REF` the GRCh38 reference base. |
 
-`python3 src/reference_data/validate_references.py` reports anything missing or in an outdated format. Lookup tables that already carry `A1`, `A2` and `AF1` keep working; rebuilding them with `--force` adds chromosome X. The 1000 Genomes download and processing is based on:
+`python3 src/reference_data/validate_references.py --reference-root /WHERE/THE/REFERENCE/DATA/IS` reports anything missing or in an outdated format. Lookup tables that already carry `A1`, `A2` and `AF1` keep working; rebuilding them with `--force` adds chromosome X. The 1000 Genomes download and processing is based on:
 - [https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3](https://www.cog-genomics.org/plink/2.0/resources#1kg_phase3)
 - [https://dougspeed.com/reference-panel/](https://dougspeed.com/reference-panel/)
 
@@ -82,7 +98,7 @@ The pipeline derives `STUDYID` as `<author>_<year>_<PMID>` and records completed
 
 On a local machine, the wrapper runs 1 eligible manifest row per invocation. Re-run the same command to process the next incomplete row.
 
-On SLURM, submit the wrapper from the repository root with `sbatch src/standardise.sh`. Inside an sbatch job the `slurm` profile is selected automatically (an explicit `--profile` still wins) and all eligible rows fan out, 1 Nextflow job per row. The head job's `#SBATCH --time` (48 h) must stay above the per-row limit (12 h in `pipeline/conf/slurm.config`); adjust both, and `params.slurm_queue` in `pipeline/nextflow.config`, for your cluster.
+On SLURM, submit the wrapper from the repository root with `sbatch src/standardise.sh`. Inside an sbatch job the `slurm` profile is selected automatically (an explicit `--profile` still wins) and all eligible rows fan out, 1 Nextflow job per row. The head job's `#SBATCH --time` (48 h) must stay above the per-row limit (12 h in `pipeline/conf/slurm.config`); adjust both, and `params.slurm_queue` in `pipeline/nextflow.config`, for your cluster. The head job's log is `slurm-<jobid>.out` in the repository root, which git ignores.
 
 Useful options:
 
@@ -281,7 +297,7 @@ Run the test suite from the repository root:
 python3 -m unittest discover -s pipeline/tests -v
 ```
 
-The suite needs the packages in `requirements.txt` and bgzip/tabix on `PATH`. The writer tests also use `bcftools`, the integration test needs `nextflow` and Java, and the R audit test needs R with the `gwasvcf` package; tests whose tools are missing are skipped. Tests never use the network: downloads run against local HTTP servers that mimic the GWAS Catalog FTP and OpenGWAS API, every non-local request is routed to a dead proxy, and shell scripts run with stubbed `wget`, `curl` and package managers.
+The suite reads its test data from `pipeline/tests/fixtures/`, which is kept in the project folder and not in git, so a fresh clone has to get that folder from an existing copy. The suite needs the packages in `requirements.txt` and bgzip/tabix on `PATH`. The writer tests also use `bcftools`, the integration test needs `nextflow` and Java, and the R audit test needs R with the `gwasvcf` package; tests whose tools are missing are skipped. Tests never use the network: downloads run against local HTTP servers that mimic the GWAS Catalog FTP and OpenGWAS API, every non-local request is routed to a dead proxy, and shell scripts run with stubbed `wget`, `curl` and package managers.
 
 | Test file | Component |
 |---|---|
