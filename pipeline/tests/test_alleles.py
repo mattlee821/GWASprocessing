@@ -174,6 +174,12 @@ class ConcordanceTests(unittest.TestCase):
 
 
 class FastaTests(unittest.TestCase):
+    def test_appledouble_files_are_not_taken_for_the_fasta(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "genome").mkdir()
+        (root / "genome" / "._hg38.fa").write_bytes(b"\x00\x05\x16\x07")
+        self.assertIsNone(alleles.Fasta.find(root))
+
     def test_bases_are_read_by_position_with_flexible_contig_names(self):
         genome = Path(tempfile.mkdtemp())
         write_fasta(genome, {"chr1": "ACGTACGTAC" * 13, "chrM": "GATTACA"}, width=7)

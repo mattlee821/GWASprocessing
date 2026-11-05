@@ -18,6 +18,17 @@ def lifter_from(blocks):
     return LiftOver(str(write_chain(tmp / "test.over.chain.gz", blocks)))
 
 
+class ChainFileTests(unittest.TestCase):
+    def test_appledouble_files_are_not_taken_for_chains(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "genome").mkdir()
+        (root / "genome" / "._hg19ToHg38.over.chain.gz").write_bytes(b"\x00\x05\x16\x07")
+        self.assertIsNone(coords.find_chain_file(root, "hg19", "hg38"))
+        real = root / "genome" / "hg19ToHg38.over.chain.gz"
+        real.write_bytes(b"chain")
+        self.assertEqual(coords.find_chain_file(root, "hg19", "hg38"), real)
+
+
 class LiftTests(unittest.TestCase):
     def test_minus_strand_target_is_reported_with_forward_position(self):
         # Block chr1:[7000,8000) -> chr1 minus strand [10000,11000) of a 248,956,422 bp chromosome.

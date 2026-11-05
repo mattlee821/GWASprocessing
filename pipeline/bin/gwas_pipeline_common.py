@@ -406,6 +406,11 @@ def resolve_row_config(config_root: str | Path, record: dict[str, Any], cli_stud
     return config
 
 
+def without_appledouble(paths: Iterable[Path]) -> list[Path]:
+    """Drop the ._ metadata files macOS writes beside each file on exFAT and network drives: Path.glob matches them."""
+    return [path for path in paths if not path.name.startswith("._")]
+
+
 def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
     """Size and mtime of every reference file that can change outputs (lookups, coordinate index, chains, FASTA)."""
     root = Path(reference_root)
@@ -413,7 +418,7 @@ def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
                 "genome/*.chain*", "genome/*.fa", "genome/*.fasta"]
     identity: dict[str, list[int]] = {}
     for pattern in patterns:
-        for path in sorted(root.glob(pattern)):
+        for path in without_appledouble(sorted(root.glob(pattern))):
             if path.is_file():
                 stat = path.stat()
                 identity[str(path.relative_to(root))] = [int(stat.st_size), int(stat.st_mtime)]

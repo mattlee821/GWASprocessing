@@ -164,6 +164,16 @@ class ConfigAndStateTests(unittest.TestCase):
         self.assertTrue(common.state_row_complete(row, qcplot=False))
 
 
+class ReferenceIdentityTests(unittest.TestCase):
+    def test_appledouble_files_do_not_change_the_identity(self):
+        root = Path(tempfile.mkdtemp())
+        (root / "genome").mkdir()
+        (root / "genome" / "hg19ToHg38.over.chain.gz").write_bytes(b"chain")
+        before = common.reference_identity(root)
+        (root / "genome" / "._hg19ToHg38.over.chain.gz").write_bytes(b"\x00\x05\x16\x07")
+        self.assertEqual(common.reference_identity(root), before)
+
+
 class ManifestReadingTests(unittest.TestCase):
     def test_missing_required_column_is_rejected(self):
         tmp = Path(tempfile.mkdtemp())

@@ -25,6 +25,7 @@ from gwas_pipeline_common import (
     normalize_chromosome_series,
     numeric_series,
     upper_alleles,
+    without_appledouble,
 )
 
 LOOKUP_COLUMNS = ["CHR", "SNP", "POS19", "A1", "A2", "AF1"]  # columns of the lookup files on disk
@@ -343,7 +344,7 @@ class Fasta:
             return None
         candidates = [genome / "GRCh38.fa", genome / "GRCh38.fasta"]
         for pattern in ("*GRCh38*.fa", "*GRCh38*.fasta", "*hg38*.fa", "*hg38*.fasta"):
-            candidates.extend(sorted(genome.glob(pattern)))
+            candidates.extend(without_appledouble(sorted(genome.glob(pattern))))
         for candidate in candidates:
             if candidate.is_file():
                 return cls(candidate)

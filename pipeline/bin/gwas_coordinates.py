@@ -27,6 +27,7 @@ from gwas_pipeline_common import (
     normalize_chromosome_series,
     numeric_series,
     upper_alleles,
+    without_appledouble,
 )
 
 CHROM_CODES = {chrom: code for code, chrom in enumerate(PRIMARY_CHROMS, start=1)}
@@ -57,7 +58,7 @@ def find_chain_file(reference_root: str | Path, source: str, target: str) -> Pat
     if not genome.is_dir():
         return None
     wanted = f"{source}to{target}".lower()
-    for path in sorted(genome.glob("*.chain*")):
+    for path in without_appledouble(sorted(genome.glob("*.chain*"))):
         if wanted in path.name.lower().replace("_", "").replace("-", ""):
             return path
     return None
