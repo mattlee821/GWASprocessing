@@ -890,17 +890,15 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
     low, high = alleles.dedup_alleles(out)  # unordered allele pair: the same variant reported either way round matches
     out["HM"] = harmonisation_action(out["PAL"].to_numpy(dtype=object), action)
     lap("grch38_alignment")
-    if dbsnp is not None:  # ID = the dbSNP rsID matching (CHR, POS38, REF = OA, ALT = EA) exactly, else none
-        found = dbsnp.rsids(out["CHR"].to_numpy(dtype=object), out["POS38"].to_numpy(dtype="float64"),
-                            out["OA"].to_numpy(dtype=object), out["EA"].to_numpy(dtype=object))
-        out["SNP"] = np.where(found > 0, np.char.add("rs", found.astype(str)).astype(object), None)
-        qc["rsid_dbsnp"] = {"matched": int((found > 0).sum()), "unmatched": int((found == 0).sum())}
-    lap("dbsnp_rsids")
     # optional FORMAT fields (SS, NC, EZ, SI) are written when the first piece has values for them (a VCF header may
     # declare fields its records never use)
     keys = settings.get("format_keys") or gwas_vcf.format_keys(
         c for c in gwas_vcf.OPTIONAL_FORMAT if cols.get(c) and c in out.columns and np.isfinite(numeric_series(out[c])).any())
-    write_piece_lines(part, out, rows[out.index.to_numpy()], low, high, action, extras, keys, settings["afs_label"])
+    # each piece is written in genome order (then input order), so the merge only interleaves pre-sorted pieces
+    row_ids = rows[out.index.to_numpy()]
+    order = np.lexsort((row_ids, out["POS38"].to_numpy(dtype="float64"), gwas_vcf.chrom_ranks(out["CHR"])))
+    write_piece_lines(part, out.iloc[order], row_ids[order], low[order], high[order], action[order], extras, keys,
+                      settings["afs_label"])
     lap("write_piece")
     decisions = {"cols": cols, "extras": extras, "build": build, "format_keys": keys,
                  "negate_log10p": bool(qc.get("p_value_source", {}).get("log10p_negated", False)),
@@ -947,7 +945,8 @@ def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.n
 
 
 def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
-                 decisions: dict[str, Any], fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None) -> None:
+                 decisions: dict[str, Any], fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None,
+                 reference_root: str = "", population: str = "") -> None:
     """Sort all pieces by position, remove duplicates, drop alignment failures, then write the header (whose
     ##SAMPLE counts are final only now) in front of the body, bgzip and index."""
     timings = {} if timings is None else timings
@@ -959,7 +958,25 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     stats = {"af_missing": 0, "effect_sum": 0.0, "effect_abs_sum": 0.0, "effect_n": 0, "max_ss": -math.inf}
     current: tuple[str, str] | None = None
     seen: set[tuple[str, str]] = set()
-    command = ["sort", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(work), *map(str, parts)]
+    command = ["sort", "-m", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(work), *map(str, parts)]
+    dbsnp = grch38_references(reference_root, population)[0] if reference_root else None
+    batch: list[str] = []
+    matched = 0
+
+    def flush(handle) -> None:
+        """Write a batch of records, with ID and FORMAT/ID set to the dbSNP rsID matching (CHROM, POS, REF, ALT)."""
+        nonlocal matched
+        if dbsnp is not None and batch:
+            fields = [line.split("\t", 5) for line in batch]
+            found = dbsnp.rsids([f[0] for f in fields], [int(f[1]) for f in fields], [f[3] for f in fields], [f[4] for f in fields])
+            matched += int((found > 0).sum())
+            for i, f in enumerate(fields):
+                rsid = f"rs{found[i]}" if found[i] > 0 else "."
+                rest = f[5]
+                head, sample = rest.rsplit(":", 1)  # FORMAT/ID is the last value of the sample column
+                batch[i] = "\t".join((f[0], f[1], rsid, f[3], f[4], f"{head}:{rsid}\n"))
+        handle.writelines(batch)
+        batch.clear()
     env = {**os.environ, "LC_ALL": "C"}
     with open(body, "w", encoding="utf-8") as out, \
             subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
@@ -974,7 +991,9 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
             actions[action] = actions.get(action, 0) + 1
             if action in alleles.REMOVED_ACTIONS:
                 continue
-            out.write(record_line)
+            batch.append(record_line)
+            if len(batch) >= 500_000:
+                flush(out)
             lp_values.append(float(lp))
             written += 1
             filled_written += filled == "1"
@@ -986,8 +1005,11 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
                 stats["effect_n"] += 1
             if math.isfinite(size):
                 stats["max_ss"] = max(stats["max_ss"], size)
+        flush(out)
     if proc.returncode != 0:
         raise RuntimeError(f"sort exited {proc.returncode} while merging {len(parts)} table pieces")
+    if dbsnp is not None:
+        qc["rsid_dbsnp"] = {"matched": matched, "unmatched": written - matched, "source": dbsnp.label}
     qc["duplicates_removed"] = duplicates
     qc["af_filled_written"] = filled_written
     if fasta is not None:
@@ -1245,7 +1267,8 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
         qc["table_pieces"] = {"pieces": len(results), "rows_per_piece": chunk_rows or "all", "workers": workers}
         moments = merge_piece_qc(qc, results, record)
         check_af_concordance(moments, qc)
-        merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall)
+        merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall,
+                     reference_root, population)
         per_step: dict[str, float] = {}
         for result in results:
             for step, seconds in result["timings"].items():

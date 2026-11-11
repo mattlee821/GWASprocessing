@@ -106,7 +106,8 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                  "or looked up by rsID, then lifted from GRCh37 where needed.",
                  {CAUSE_TEXT[c]: _n((causes.get(c) or {}).get("rows")) for c in COORDINATE_CAUSES},
                  {"positions parsed from chr:pos identifiers": _n(qc.get("positions_from_variant_ids")),
-                  "position looked up by rsID": _n(fills.get("POS19")),
+                  "GRCh37 position looked up by rsID (1000 Genomes)": _n(fills.get("POS19")),
+                  "GRCh38 position looked up by rsID (dbSNP, no liftover)": _n(fills.get("POS38")),
                   f"lifted from GRCh37 to GRCh38{' (BCFtools/liftover)' if lift.get('tool') else ''}": _n(lift.get("ok")),
                   "alleles complemented after a minus-strand liftover": _n(lift.get("minus_strand")),
                   "alleles swapped between builds (reference allele changed)": _n(lift.get("swapped_between_builds"))}, notes)

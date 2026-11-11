@@ -98,7 +98,7 @@ class Grch38ReferenceTests(unittest.TestCase):
         by_pos = {r["POS"]: r for r in result.rows}
         self.assertEqual(by_pos[1000]["ID"], "rs5000")
         self.assertEqual((by_pos[wrong[1]]["ID"], by_pos[wrong[1]]["INFO"]["SNPID"]), (".", "rs5003"))
-        self.assertEqual(result.qc["rsid_dbsnp"], {"matched": 29, "unmatched": 1})
+        self.assertEqual((result.qc["rsid_dbsnp"]["matched"], result.qc["rsid_dbsnp"]["unmatched"]), (29, 1))
 
     def test_build_is_detected_from_the_paired_sample(self):
         header = ["CHR", "POS", "EA", "OA", "EAF", "BETA", "SE", "P"]

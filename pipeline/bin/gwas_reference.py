@@ -54,6 +54,35 @@ def base_codes(alleles: Any) -> np.ndarray:
     return pd.Series(alleles, dtype=object).astype(str).str.upper().map(BASES).fillna(0).to_numpy(dtype="uint8")
 
 
+BLOCK = 4096  # coarse-index stride: a lookup reads about 4 pages of a memory-mapped array instead of about 30
+
+
+def coarse_index(sorted_array: np.ndarray) -> np.ndarray:
+    """Every BLOCK-th value of a sorted array, held in memory, to narrow binary searches to 1 block."""
+    return np.asarray(sorted_array[::BLOCK])
+
+
+def searchsorted_blocked(sorted_array: np.ndarray, coarse: np.ndarray, query: np.ndarray, side: str = "left") -> np.ndarray:
+    """np.searchsorted on a large memory-mapped array, with the top levels of the search done in memory (coarse)."""
+    n = len(sorted_array)
+    if n == 0:
+        return np.zeros(len(query), dtype="int64")
+    block = np.searchsorted(coarse, query, side=side) - 1
+    lo = np.clip(block, 0, None).astype("int64") * BLOCK
+    hi = np.minimum(lo + BLOCK + 1, n).astype("int64")
+    lo = np.where(block < 0, 0, lo)
+    while True:
+        active = lo < hi
+        if not active.any():
+            return lo
+        mid = (lo + hi) // 2
+        value = np.asarray(sorted_array[np.minimum(mid, n - 1)])
+        go_right = (value < query) if side == "left" else (value <= query)
+        go_right &= active
+        lo = np.where(go_right, mid + 1, lo)
+        hi = np.where(active & ~go_right, mid, hi)
+
+
 def _memmap(path: Path, dtype: str) -> np.ndarray:
     return np.memmap(path, dtype=dtype, mode="r") if path.exists() and path.stat().st_size else np.zeros(0, dtype=dtype)
 
@@ -88,7 +117,9 @@ class Dbsnp:
             return code, pos
         query = rs_numbers[valid].astype("uint32")
         order = np.argsort(query, kind="stable")
-        idx = np.searchsorted(self.rs, query[order])
+        if not hasattr(self, "_rs_coarse"):
+            self._rs_coarse = coarse_index(self.rs)
+        idx = searchsorted_blocked(self.rs, self._rs_coarse, query[order])
         idx_clipped = np.minimum(idx, len(self.rs) - 1)
         found = np.asarray(self.rs[idx_clipped]) == query[order]
         rows = np.where(valid)[0][order]
@@ -96,9 +127,10 @@ class Dbsnp:
         pos[rows[found]] = np.asarray(self.rs_pos[idx_clipped[found]], dtype="int64")
         return code, pos
 
-    def _chromosome(self, chrom: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    def _chromosome(self, chrom: str) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         if chrom not in self._chrom:
-            self._chrom[chrom] = tuple(_memmap(self.root / f"chr{chrom}.{kind}.u32", "<u4") for kind in ("pos", "hash", "rs"))
+            arrays = tuple(_memmap(self.root / f"chr{chrom}.{kind}.u32", "<u4") for kind in ("pos", "hash", "rs"))
+            self._chrom[chrom] = (*arrays, coarse_index(arrays[0]))
         return self._chrom[chrom]
 
     def rsids(self, chrom: Any, pos: Any, ref: Any, alt: Any) -> np.ndarray:
@@ -109,12 +141,13 @@ class Dbsnp:
         out = np.zeros(len(codes), dtype="int64")
         for code in np.unique(codes[codes > 0]):
             rows = np.where(codes == code)[0]
-            db_pos, db_hash, db_rs = self._chromosome(CHROMS[code - 1])
+            db_pos, db_hash, db_rs, coarse = self._chromosome(CHROMS[code - 1])
             if not len(db_pos):
                 continue
+            rows = rows[np.argsort(positions[rows], kind="stable")]  # sorted queries read the memory map nearly sequentially
             query = positions[rows].astype("uint32")
-            lo = np.searchsorted(db_pos, query, side="left")
-            hi = np.searchsorted(db_pos, query, side="right")
+            lo = searchsorted_blocked(db_pos, coarse, query, "left")
+            hi = searchsorted_blocked(db_pos, coarse, query, "right")
             span = hi - lo
             for k in range(int(span.max()) if len(span) else 0):
                 todo = (span > k) & (out[rows] == 0)
