@@ -93,9 +93,10 @@ def align(raw: pd.Series, other: pd.Series) -> dict:
     if other is None:
         return {"present": False}
     r_ea, r_oa, o_ea, o_oa = str(raw.ea), str(raw.oa), str(other.ea).upper(), str(other.oa).upper()
-    if (o_ea, o_oa) == (r_ea, r_oa) or (o_ea, o_oa) == (comp(r_ea), comp(r_oa)):
+    palindromic = comp(r_ea) == r_oa  # A/T or C/G: complementing equals swapping, so only exact orders are compared
+    if (o_ea, o_oa) == (r_ea, r_oa) or (not palindromic and (o_ea, o_oa) == (comp(r_ea), comp(r_oa))):
         sign, af = 1.0, other.af
-    elif (o_ea, o_oa) == (r_oa, r_ea) or (o_ea, o_oa) == (comp(r_oa), comp(r_ea)):
+    elif (o_ea, o_oa) == (r_oa, r_ea) or (not palindromic and (o_ea, o_oa) == (comp(r_oa), comp(r_ea))):
         sign, af = -1.0, 1 - other.af if pd.notna(other.af) else np.nan
     else:
         return {"present": True, "alleles_match": False}
@@ -145,18 +146,24 @@ def main() -> None:
             if rsid not in raw.index:
                 continue
             other = indexed.loc[rsid] if rsid in indexed.index else None
-            result = {"pipeline": name, "rsid": rsid, "lead": rsid in leads, **align(raw.loc[rsid], other)}
+            raw_row = raw.loc[rsid]
+            result = {"pipeline": name, "rsid": rsid, "lead": rsid in leads, "palindromic": comp(raw_row.ea) == raw_row.oa,
+                      **align(raw_row, other)}
             if other is not None:
                 result.update({"chrom": other.chrom, "pos": other.pos, "ea": other.ea, "oa": other.oa, "effect": other.effect,
                                "se": other.se, "lp": other.lp, "af": other.af})
             results.append(result)
         df = pd.DataFrame(results)
         present = df[df["present"]]
-        aligned = present[present.get("alleles_match", pd.Series(dtype=bool)).fillna(False).astype(bool)] if len(present) else present
+        aligned = present[present["alleles_match"].astype("boolean").fillna(False).astype(bool)] if len(present) else present
         rate = lambda col: float(aligned[col].dropna().astype(bool).mean()) if len(aligned) and col in aligned and aligned[col].notna().any() else math.nan  # noqa: E731
         summary.append({"pipeline": name, "sampled": len(df), "present": int(df["present"].sum()),
                         "alleles_match": int(len(aligned)), "sign_agrees": rate("sign_agrees"), "effect_equal": rate("effect_equal"),
                         "se_equal": rate("se_equal"), "lp_equal": rate("lp_equal"), "af_close": rate("af_close"),
+                        "sign_agrees_palindromic": float(aligned.loc[aligned["palindromic"], "sign_agrees"].astype(bool).mean())
+                        if len(aligned) and aligned["palindromic"].any() else math.nan,
+                        "sign_agrees_other": float(aligned.loc[~aligned["palindromic"], "sign_agrees"].astype(bool).mean())
+                        if len(aligned) and (~aligned["palindromic"]).any() else math.nan,
                         "leads_present": int(df.loc[df["lead"], "present"].sum()), "leads": len(leads)})
         records.append(df)
     pd.DataFrame(summary).to_csv(out_dir / "summary.tsv", sep="\t", index=False, float_format="%.4f")
