@@ -6,6 +6,7 @@
 #   bash src/source.sh --tools-only     # only install/verify tools and Python packages
 #   bash src/source.sh --reference-only # only build/download reference data (tools must exist)
 #   bash src/source.sh --force          # rebuild lookup tables and the rsID coordinate index
+#   bash src/source.sh --r-packages     # only install the R packages for the R audit test (gwasvcf, VariantAnnotation)
 #
 # Idempotent: every step skips work whose output already exists, so it is safe to re-run after an
 # interruption. Tool locations (PLINK2, NEXTFLOW, GWAS_VENV) are written to server.env, which
@@ -126,6 +127,26 @@ install_python_packages() {
   echo "python packages: installed into ${ROOT_DIR}/${venv} (src/standardise.sh puts it first on PATH)"
 }
 
+# R packages are needed only by pipeline/tests/test_audit.py, which checks that R's gwasvcf reads the output.
+install_r_packages() {
+  if ! command -v Rscript >/dev/null 2>&1; then
+    echo "R packages: Rscript not found; install R (https://cran.r-project.org) first" >&2
+    return 1
+  fi
+  if Rscript -e 'quit(status = !all(sapply(c("gwasvcf", "VariantAnnotation", "GenomeInfoDb"), requireNamespace, quietly = TRUE)))' >/dev/null 2>&1; then
+    echo "R packages: gwasvcf and VariantAnnotation already available"
+    return
+  fi
+  echo "R packages: installing VariantAnnotation (Bioconductor) and gwasvcf (github.com/MRCIEU/gwasvcf)"
+  Rscript -e '
+    repos <- "https://cloud.r-project.org"
+    for (p in c("BiocManager", "remotes")) if (!requireNamespace(p, quietly = TRUE)) install.packages(p, repos = repos)
+    # gwasvcf imports GenomeInfoDb, which Bioconductor 3.23 no longer installs alongside VariantAnnotation
+    BiocManager::install(c("VariantAnnotation", "GenomeInfoDb"), update = FALSE, ask = FALSE)
+    remotes::install_github("MRCIEU/gwasvcf", upgrade = "never")
+    stopifnot(requireNamespace("gwasvcf", quietly = TRUE))'
+}
+
 build_reference_data() {
   local force_flag=()
   [[ "${FORCE}" -eq 1 ]] && force_flag=(--force)
@@ -141,17 +162,23 @@ main() {
   TOOLS_ONLY=0
   REFERENCE_ONLY=0
   FORCE=0
+  R_ONLY=0
   local arg
   for arg in "$@"; do
     case "${arg}" in
       --tools-only) TOOLS_ONLY=1 ;;
       --reference-only) REFERENCE_ONLY=1 ;;
       --force) FORCE=1 ;;
-      -h|--help) sed -n '2,13p' "${BASH_SOURCE[0]}"; exit 0 ;;
+      --r-packages) R_ONLY=1 ;;
+      -h|--help) sed -n '2,14p' "${BASH_SOURCE[0]}"; exit 0 ;;
       *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
     esac
   done
   load_settings "${ROOT_DIR}"
+  if [[ "${R_ONLY}" -eq 1 ]]; then
+    install_r_packages
+    return
+  fi
   echo "== GWASprocessing setup =="
   if [[ "${REFERENCE_ONLY}" -eq 0 ]]; then
     echo "-- Tools --"

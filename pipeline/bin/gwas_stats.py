@@ -46,12 +46,14 @@ def _as_array(values: Any, n: int) -> np.ndarray:
     return np.asarray(values, dtype="float64").reshape(-1)
 
 
-def compute_lp(p: Any = None, log10p: Any = None, beta: Any = None, se: Any = None) -> tuple[np.ndarray, dict[str, Any]]:
+def compute_lp(p: Any = None, log10p: Any = None, beta: Any = None, se: Any = None,
+               negate_log10p: bool | None = None) -> tuple[np.ndarray, dict[str, Any]]:
     """Return (LP array, provenance counts).
 
     Order per row: a non-negative LOG10P value (a column that is mostly negative is read as log10 P and
     negated); else -log10 P for 0 < P <= 1; else, when P is 0 or absent, -log10 of the two-sided Wald P
-    from BETA/SE (SE > 0). P outside [0, 1] stays missing.
+    from BETA/SE (SE > 0). P outside [0, 1] stays missing. `negate_log10p` fixes the negation decision
+    (pieces of one table share the first piece's decision); None decides it from these values.
     """
     lengths = [len(np.asarray(v).reshape(-1)) for v in (p, log10p, beta, se) if v is not None]
     n = lengths[0] if lengths else 0
@@ -60,7 +62,9 @@ def compute_lp(p: Any = None, log10p: Any = None, beta: Any = None, se: Any = No
     info: dict[str, Any] = {"from_log10p": 0, "from_p": 0, "from_z": 0, "invalid": 0, "log10p_negated": False}
 
     finite_l = np.isfinite(l_arr)
-    if finite_l.any() and float(np.median(l_arr[finite_l])) < 0:
+    if negate_log10p is None:
+        negate_log10p = bool(finite_l.any() and float(np.median(l_arr[finite_l])) < 0)
+    if negate_log10p:
         l_arr = -l_arr
         info["log10p_negated"] = True
     use_l = finite_l & (l_arr >= 0)

@@ -27,3 +27,6 @@ __pycache__/
 .Ruserdata
 .DS_Store
 ._*
+
+# Prepared reference-lookup caches written by the pipeline (also inside the test examples)
+*.prepared/

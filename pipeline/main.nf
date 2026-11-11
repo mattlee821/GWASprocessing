@@ -65,6 +65,7 @@ process STANDARDISE_ROW {
       --force "${params.force}" \\
       --dry-run "${params.dry_run}" \\
       --analysis-qc "${params.analysis_qc}" \\
+      --workers ${task.cpus} \\
       --output standardise_record.json
 
     if [[ "${params.qcplot}" == "true" ]]; then

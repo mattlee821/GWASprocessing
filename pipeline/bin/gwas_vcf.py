@@ -148,8 +148,13 @@ def table_body_lines(df: pd.DataFrame, extras: Iterable[str]) -> list[str]:
     return list(lines)
 
 
+def chrom_ranks(chrom: pd.Series) -> np.ndarray:
+    """Numeric sort rank of each chromosome (1-22, X, Y, MT; 99 for anything else)."""
+    return normalize_chromosome_series(chrom).map(lambda c: _RANK.get(str(c), 99)).to_numpy(dtype="int64")
+
+
 def sort_frame(df: pd.DataFrame) -> pd.DataFrame:
-    rank = normalize_chromosome_series(df["CHR"]).map(lambda c: _RANK.get(str(c), 99)).to_numpy(dtype="int64")
+    rank = chrom_ranks(df["CHR"])
     order = np.lexsort((numeric_series(df["POS38"]).to_numpy(), rank))
     return df.iloc[order]
 

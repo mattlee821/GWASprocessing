@@ -5,7 +5,10 @@ GWAS-VCF: GRCh38 POS, GRCh37 INFO/POS19, trait metadata in the header, ES/AF rel
 Usage (called once per manifest row by pipeline/main.nf):
     standardise_gwas.py --stage-record stage.json --config-root manifests --reference-root references \
         [--study-yaml extra.yaml] [--analysis-qc true|false] [--force true|false] [--dry-run true|false] \
-        --output record.json
+        [--workers N] --output record.json
+
+Tables are read in pieces of 1,000,000 rows (GWAS_TABLE_CHUNK overrides); --workers N (or GWAS_WORKERS)
+standardises N pieces at a time. Output is the same for any piece size or number of workers.
 
 Exit codes: 0 success; 78 configuration error (stops the Nextflow run); 65 unusable input data.
 """
@@ -16,11 +19,16 @@ import argparse
 import csv
 import gzip
 import math
+import multiprocessing
 import os
 import platform
 import re
 import shutil
 import subprocess
+import sys
+import time
+from array import array
+from concurrent.futures import FIRST_COMPLETED, ProcessPoolExecutor, wait
 from pathlib import Path
 from statistics import NormalDist
 from typing import Any
@@ -31,6 +39,7 @@ import pandas as pd
 import gwas_alleles as alleles
 import gwas_coordinates as coords
 import gwas_stats
+import gwas_steps
 import gwas_vcf
 from gwas_pipeline_common import (
     ALT_ALIASES,
@@ -180,10 +189,11 @@ def apply_configured_joins(df: pd.DataFrame, config: dict[str, Any], qc: dict[st
         if duplicates:
             join_df = join_df.drop_duplicates(subset=[right_on], keep="first")
             qc["warnings"].append(f"join file {path} had {duplicates} duplicate {right_on} keys; kept the first of each")
-        before_cols = set(out.columns)
+        before_cols, before_rows = set(out.columns), int(len(out))
         out = pd.merge(out, join_df, how=item.get("how", "left"), left_on=left_on, right_on=right_on, suffixes=("", "_join"))
         qc.setdefault("joins", []).append({"file": str(path), "left_on": left_on, "right_on": right_on,
-                                           "added_columns": sorted(set(out.columns) - before_cols)})
+                                           "added_columns": sorted(set(out.columns) - before_cols),
+                                           "rows_before": before_rows, "rows_after": int(len(out))})
     return out.reset_index(drop=True)
 
 
@@ -307,7 +317,10 @@ def normalize_variant_identifiers(out: pd.DataFrame, qc: dict[str, Any]) -> pd.D
     return out
 
 
-def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[str, Any], qc: dict[str, Any]) -> pd.DataFrame:
+def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[str, Any], qc: dict[str, Any],
+                    negate_log10p: bool | None = None, derive_oa: bool | None = None) -> pd.DataFrame:
+    """Canonical columns from the source columns. `negate_log10p` and `derive_oa` fix decisions that otherwise
+    depend on the whole column (pieces of one table share the first piece's decisions); None decides here."""
     transforms = config.get("transforms", {}) or {}
 
     def take(field: str) -> pd.Series:
@@ -327,8 +340,9 @@ def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[
         out[field] = (values.str.upper() if uppercase else values).astype(object)
     out = normalize_variant_identifiers(out, qc)
 
-    oa_missing = upper_alleles(out["OA"]) == ""
-    if (transforms.get("derive_oa_from_ref_alt", False) or oa_missing.all()) and cols.get("REF") and cols.get("ALT"):
+    if derive_oa is None:
+        derive_oa = bool(transforms.get("derive_oa_from_ref_alt", False) or (upper_alleles(out["OA"]) == "").all())
+    if derive_oa and cols.get("REF") and cols.get("ALT"):
         ea, ref, alt = upper_alleles(out["EA"]), upper_alleles(df[cols["REF"]]), upper_alleles(df[cols["ALT"]])
         derived = np.where((ea != "") & (ea == ref), alt, np.where((ea != "") & (ea == alt), ref, ""))
         use = derived != ""
@@ -354,7 +368,8 @@ def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[
     derivations["se_from_p"] = int(se_from_p.sum())
     qc["derivations"] = derivations
 
-    lp, lp_info = gwas_stats.compute_lp(p=out["P"], log10p=out["LOG10P"], beta=out["BETA"], se=out["SE"])
+    lp, lp_info = gwas_stats.compute_lp(p=out["P"], log10p=out["LOG10P"], beta=out["BETA"], se=out["SE"],
+                                        negate_log10p=negate_log10p)
     out["LP"] = lp
     qc["p_value_source"] = lp_info
     out = out.drop(columns=["P", "LOG10P", "OR", "CI_LOWER", "CI_UPPER"])
@@ -450,9 +465,8 @@ def fill_coordinates_by_rsid(out: pd.DataFrame, reference_root: str, lookup: pd.
     out.loc[rows, "CHR"] = found.loc[rows, "CHR"].to_numpy()
     out.loc[rows, "POS19"] = found_pos[use]
     fills["POS19"] += int(use.sum())
-    conflicts = int((np.isfinite(found_pos) & ~chr_ok).sum())
-    if conflicts:
-        qc["warnings"].append(f"{conflicts} rsIDs map to a different chromosome than the input reports; their coordinates were not filled")
+    # Counted here and reported once per table (count_warnings), so pieces of a table add up.
+    qc["rsid_chromosome_conflicts"] = qc.get("rsid_chromosome_conflicts", 0) + int((np.isfinite(found_pos) & ~chr_ok).sum())
     return out
 
 
@@ -490,7 +504,8 @@ def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, A
     if need19.any():
         lifter, reason = coords.load_liftover(reference_root, "hg38", "hg19")
         if lifter is None:
-            qc["warnings"].append(f"{reason}; POS19 left missing for {int(need19.sum())} variants")
+            qc["pos19_missing_reason"] = reason
+            qc["pos19_missing_variants"] = qc.get("pos19_missing_variants", 0) + int(need19.sum())
         else:
             result = coords.lift(out.loc[need19, "CHR"], out.loc[need19, "POS38"], lifter)
             rows = out.index[need19]
@@ -500,7 +515,33 @@ def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, A
     return out
 
 
-def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFrame:
+# Why a row without its required fields was dropped: the first cause that applies, in this order, so the causes
+# add up to the rows removed. Coordinate causes come first because a row without a position cannot be used whatever
+# its statistics.
+INCOMPLETE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "liftover_to_grch38_failed", "chromosome_not_primary",
+                     "invalid_position", "missing_allele", "missing_beta", "missing_or_invalid_se", "missing_or_invalid_p")
+
+
+def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.ndarray:
+    """The first cause (INCOMPLETE_CAUSES) for each row failing a check in `checks`; '' for complete rows."""
+    pos19, pos38 = np.isfinite(out["POS19"]).to_numpy(), np.isfinite(out["POS38"]).to_numpy()
+    rsid = out["SNP"].astype("string").str.match(r"^rs\d+$").fillna(False).to_numpy(dtype=bool)
+    no_position = ~pos19 & ~pos38
+    conditions = [
+        no_position & rsid,
+        no_position & ~rsid,
+        pos19 & ~pos38,
+        ~checks["CHR"],
+        ~checks["POS38"],
+        ~checks["EA"] | ~checks["OA"],
+        ~checks["BETA"],
+        ~checks["SE"],
+        ~checks["LP"],
+    ]
+    return np.select(conditions, list(INCOMPLETE_CAUSES), default="").astype(object)
+
+
+def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any], maf_threshold: float = 0.01) -> pd.DataFrame:
     checks = {
         "CHR": out["CHR"].astype(str).isin(PRIMARY_CHROMS).to_numpy(),
         "POS38": (np.isfinite(out["POS38"]) & (out["POS38"] > 0)).to_numpy(),
@@ -513,16 +554,33 @@ def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFrame:
     keep = np.logical_and.reduce(list(checks.values())) if len(out) else np.zeros(0, dtype=bool)
     qc["missing_required_by_field"] = {field: int((~mask).sum()) for field, mask in checks.items()}
     qc["rows_removed_missing_required"] = int((~keep).sum())
+    if len(out) and not keep.all():
+        cause = incomplete_causes(out, checks)
+        eaf = numeric_series(out["EAF"]).to_numpy(dtype="float64")
+        rare = np.isfinite(eaf) & (np.minimum(eaf, 1.0 - eaf) < maf_threshold)
+        no_eaf = ~np.isfinite(eaf)
+        detail = qc.setdefault("incomplete_by_cause", {})
+        for name in INCOMPLETE_CAUSES:
+            hit = cause == name
+            if hit.any():
+                detail[name] = {"rows": int(hit.sum()), "study_maf_below_threshold": int((hit & rare).sum()),
+                                "no_study_eaf": int((hit & no_eaf).sum())}
     return out[keep]
 
 
-def annotate_and_check(out: pd.DataFrame, lookup: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFrame:
+def annotate_with_reference(out: pd.DataFrame, lookup: pd.DataFrame, qc: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Reference annotation and rsID/EAF fills; returns the frame and its allele-frequency concordance moments."""
     out = alleles.annotate_with_reference(out, lookup)
     out, rsid_fills = alleles.fill_missing_rsids(out)
     out, eaf_fills = alleles.fill_eaf_from_reference(out)
     fills = qc.setdefault("reference_fills", {})
     fills["rsid"], fills["EAF"] = rsid_fills, eaf_fills
-    concordance = alleles.af_concordance(out)
+    return out, alleles.af_moments(out)
+
+
+def check_af_concordance(moments: dict[str, float], qc: dict[str, Any]) -> None:
+    """Fail when study and reference frequencies anti-correlate (swapped allele columns); warn when they barely agree."""
+    concordance = alleles.af_concordance_from_moments(moments)
     qc["af_concordance"] = concordance
     r = concordance.get("pearson_r")
     if r is not None and concordance["n"] >= AF_CONCORDANCE_MIN_N and r < 0:
@@ -533,33 +591,22 @@ def annotate_and_check(out: pd.DataFrame, lookup: pd.DataFrame, qc: dict[str, An
         )
     if r is not None and concordance["n"] >= 100 and r < 0.5:
         qc["warnings"].append(f"weak agreement between study EAF and the reference (r={r:.2f}); check allele columns and ancestry")
-    return out
 
 
-def finish_frame(out: pd.DataFrame, config: dict[str, Any], analysis_qc: bool, fasta: Any, record: dict[str, Any],
-                 input_rows: int, qc: dict[str, Any]) -> pd.DataFrame:
-    qc["analysis_qc"] = bool(analysis_qc)
-    if analysis_qc:
-        out = alleles.apply_analysis_qc(out, config.get("analysis_qc"), qc)
-    if fasta is not None:
-        out, qc["reference_alignment"] = alleles.align_table_to_reference(out, fasta)
-    else:
-        qc["reference_alignment"] = {"performed": False, "reason": "no GRCh38 FASTA under <reference_root>/genome"}
-        qc["warnings"].append("REF/ALT not aligned to the GRCh38 reference: no FASTA found (run src/reference_data/download_fasta_and_chains.sh)")
-    if len(out) == 0:
+def check_output_rows(written: int, record: dict[str, Any], qc: dict[str, Any]) -> None:
+    if written == 0:
         missing = {k: v for k, v in qc.get("missing_required_by_field", {}).items() if v}
         raise data_error(
             f"No variants remain for {record.get('study_id')}/{record.get('output_id')} after standardisation "
             f"(rows missing required fields: {missing or 'none'}; source columns: {qc.get('source_columns')}). "
             "Map the missing columns (e.g. SE, P) in the study YAML `columns` block."
         )
-    retained = len(out) / input_rows if input_rows else 1.0
+    input_rows = qc.get("input_rows", 0)
+    retained = written / input_rows if input_rows else 1.0
     if retained < RETENTION_WARNING:
-        qc["warnings"].append(f"retained {len(out)} of {input_rows} input rows ({retained:.0%}); see missing_required_by_field, "
+        qc["warnings"].append(f"retained {written} of {input_rows} input rows ({retained:.0%}); see missing_required_by_field, "
                               "liftover and qc_removed")
-    qc["output_rows"] = int(len(out))
-    qc["lambda_gc"] = gwas_stats.lambda_gc(out["LP"])
-    return out
+    qc["output_rows"] = int(written)
 
 
 def candidate_columns(raw_path: Path, sep: str, config: dict[str, Any]) -> list[str] | None:
@@ -578,36 +625,290 @@ def candidate_columns(raw_path: Path, sep: str, config: dict[str, Any]) -> list[
     return keep or None
 
 
-def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any], reference_root: str,
-                      analysis_qc: bool, lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any]) -> None:
-    sep = normalize_delimiter_value(config.get("delimiter")) or infer_delimiter(raw_path)
-    usecols = candidate_columns(raw_path, sep, config)
-    df = read_table(raw_path, delimiter=sep, usecols=usecols)
-    qc["input_rows"] = int(len(df))
-    qc["input_delimiter"] = sep
-    transforms = config.get("transforms", {}) or {}
-    if transforms.get("strip_hash_header", True) and len(df.columns):
-        df.columns = [str(c).lstrip("#") for c in df.columns]
+# Tables are standardised in pieces of TABLE_CHUNK rows so memory stays bounded whatever the table's size,
+# and pieces can run in parallel (--workers). Each piece goes through every per-row step and writes sortable
+# lines; the steps that need the whole table run once over the merged pieces: the sort by position,
+# deduplication (first record in input order, as for a whole table), the alignment summary, lambda GC and
+# the allele-frequency concordance check (pooled moments). Decisions that read a whole column (which columns
+# to use, LOG10P sign, deriving OA from REF/ALT, the genome build) are taken from the first piece.
+
+TABLE_CHUNK = 1_000_000  # table rows per piece (GWAS_TABLE_CHUNK overrides)
+ROW_COLUMN = "_gwasprocessing_row"  # input row number, carried through each piece to restore input order
+FIRST_PIECE_ONLY = ("build_detection", "analysis_qc_settings", "source_columns")
+
+
+def table_chunk_rows(config: dict[str, Any]) -> int | None:
+    """Rows per piece; None reads the table whole, because a right or outer join needs every row at once."""
+    for item in config.get("joins", []) or []:
+        if isinstance(item, dict) and str(item.get("how", "left")).lower() not in ("left", "inner"):
+            return None
+    return max(1, int(os.environ.get("GWAS_TABLE_CHUNK", TABLE_CHUNK)))
+
+
+def read_pieces(raw_path: Path, sep: str, usecols: list[str] | None, chunk_rows: int | None, config: dict[str, Any]):
+    """Yield the table in pieces with ROW_COLUMN numbering the input rows; an empty table yields one empty piece."""
+    strip = (config.get("transforms", {}) or {}).get("strip_hash_header", True)
+    offset = 0
+
+    def numbered(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.reset_index(drop=True)
+        if strip and len(df.columns):
+            df.columns = [str(c).lstrip("#") for c in df.columns]
+        df[ROW_COLUMN] = np.arange(offset, offset + len(df), dtype="int64")
+        return df
+
+    if chunk_rows is None:
+        yield numbered(read_table(raw_path, delimiter=sep, usecols=usecols))
+        return
+    yielded = False
+    with read_table(raw_path, delimiter=sep, usecols=usecols, chunksize=chunk_rows) as reader:
+        for df in reader:
+            piece = numbered(df)
+            offset += len(piece)
+            yielded = True
+            yield piece
+    if not yielded:
+        yield numbered(read_table(raw_path, delimiter=sep, usecols=usecols, nrows=0))
+
+
+def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.DataFrame, fasta: Any, part: Path) -> dict[str, Any]:
+    """Run every per-row step on one piece and write its lines to `part` (see write_piece_lines).
+
+    Returns the piece's QC counts, frequency moments, the decisions later pieces must share, and seconds per step."""
+    config, record, reference_root = settings["config"], settings["record"], settings["reference_root"]
+    qc: dict[str, Any] = {"warnings": [], "reference_fills": {}, "input_rows": int(len(df))}
+    timings: dict[str, float] = {}
+    clock = [time.perf_counter()]
+
+    def lap(step: str) -> None:
+        now = time.perf_counter()
+        timings[step] = timings.get(step, 0.0) + now - clock[0]
+        clock[0] = now
+
     df = apply_configured_exclusions(df, config, qc)
     df = apply_configured_joins(df, config, qc)
-    cols = select_columns(df, config)
-    qc["source_columns"] = {k: v for k, v in cols.items() if v}
-    out = build_canonical(df, cols, config, qc)
+    rows = df[ROW_COLUMN].to_numpy(dtype="int64")
+    cols = settings.get("cols")
+    if cols is None:
+        cols = select_columns(df.drop(columns=[ROW_COLUMN]), config)
+        qc["source_columns"] = {k: v for k, v in cols.items() if v}
+    out = build_canonical(df, cols, config, qc, negate_log10p=settings.get("negate_log10p"), derive_oa=settings.get("derive_oa"))
     extras = [e for e in (config.get("extras", []) or []) if e in out.columns]
     del df
+    lap("columns_and_statistics")
     out = fill_positions_from_ids(out, qc)
+    build = settings.get("build")
     if np.isfinite(out["POS"]).any() and (~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"]) & np.isfinite(out["POS"])).any():
-        build = resolve_input_build(out, record, config, lookup, reference_root, qc)
+        build = build or resolve_input_build(out, record, config, lookup, reference_root, qc)
         target = "POS19" if build == "hg19" else "POS38"
         assign = np.isfinite(out["POS"]) & ~np.isfinite(out[target])
         out.loc[assign, target] = out.loc[assign, "POS"]
     out = out.drop(columns=["POS"])
+    lap("positions_and_build")
     out = fill_coordinates_by_rsid(out, reference_root, lookup, qc)
+    lap("rsid_coordinates")
     out = establish_dual_build(out, reference_root, qc)
-    out = drop_incomplete_rows(out, qc)
-    out = annotate_and_check(out, lookup, qc)
-    out = finish_frame(out, config, analysis_qc, fasta, record, qc["input_rows"], qc)
-    gwas_vcf.write_table_vcf(out, vcf_path, record, extras)
+    lap("liftover")
+    maf_threshold = float({**alleles.ANALYSIS_QC_DEFAULTS, **(config.get("analysis_qc") or {})}.get("maf_threshold", 0.01))
+    out = drop_incomplete_rows(out, qc, maf_threshold)
+    out, moments = annotate_with_reference(out, lookup, qc)
+    lap("reference_annotation")
+    if settings["analysis_qc"]:
+        out = alleles.apply_analysis_qc(out, config.get("analysis_qc"), qc, deduplicate_rows=False)
+    low, high = alleles.dedup_alleles(out)  # the key deduplication uses, before alignment can complement alleles
+    lap("analysis_qc")
+    if fasta is not None:
+        out, action = alleles.orient_to_reference(out, fasta)
+    else:
+        action = np.full(len(out), "keep", dtype=object)
+    lap("grch38_alignment")
+    write_piece_lines(part, out, rows[out.index.to_numpy()], low, high, action, extras)
+    lap("write_piece")
+    decisions = {"cols": cols, "extras": extras, "build": build,
+                 "negate_log10p": bool(qc.get("p_value_source", {}).get("log10p_negated", False)),
+                 "derive_oa": bool(qc.get("derived_oa_from_ref_alt", False))}
+    return {"qc": qc, "moments": moments, "decisions": decisions, "part": str(part), "timings": timings}
+
+
+def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.ndarray, high: np.ndarray,
+                      action: np.ndarray, extras: list[str]) -> None:
+    """One line per row: chromosome rank, POS38, input row, dedup allele pair, alignment action, LP, VCF record.
+
+    The leading fields let `sort` restore genome order with input order as the tie-break; LP is kept at full
+    precision for lambda GC. Rows that alignment will drop are kept so they still claim their dedup key."""
+    with open(part, "w", encoding="utf-8") as handle:
+        step = 500_000
+        for start in range(0, len(out), step):
+            piece = out.iloc[start:start + step]
+            sl = slice(start, start + step)
+            lines = np.array(gwas_vcf.table_body_lines(piece, extras), dtype=object)
+            rank = gwas_vcf.chrom_ranks(piece["CHR"]).astype(str).astype(object)
+            pos = piece["POS38"].to_numpy(dtype="float64").astype("int64").astype(str).astype(object)
+            lp = np.char.mod("%.17g", piece["LP"].to_numpy(dtype="float64")).astype(object)
+            keys = (rank + "\t" + pos + "\t" + rows[sl].astype(str).astype(object) + "\t" + low[sl].astype(object)
+                    + "\t" + high[sl].astype(object) + "\t" + action[sl].astype(object) + "\t" + lp + "\t" + lines)
+            handle.write("\n".join(keys.tolist()) + "\n")
+
+
+def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], extras: list[str],
+                 deduplicate: bool, fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None) -> None:
+    """Sort all pieces by position, deduplicate, drop alignment failures, write and index the VCF."""
+    timings = {} if timings is None else timings
+    started = time.perf_counter()
+    plain = work / "table.vcf"
+    actions: dict[str, int] = {}
+    lp_values = array("d")
+    duplicates = written = 0
+    current: tuple[str, str] | None = None
+    seen: set[tuple[str, str]] = set()
+    command = ["sort", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(work), *map(str, parts)]
+    env = {**os.environ, "LC_ALL": "C"}
+    with open(plain, "w", encoding="utf-8") as out, \
+            subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
+        out.write("\n".join(gwas_vcf.table_header(record, extras)) + "\n")
+        for line in proc.stdout:
+            rank, pos, _row, low, high, action, lp, body = line.split("\t", 7)
+            if deduplicate:
+                if (rank, pos) != current:
+                    current, seen = (rank, pos), set()
+                if (low, high) in seen:
+                    duplicates += 1
+                    continue
+                seen.add((low, high))
+            actions[action] = actions.get(action, 0) + 1
+            if action == "drop":
+                continue
+            out.write(body)
+            lp_values.append(float(lp))
+            written += 1
+    if proc.returncode != 0:
+        raise RuntimeError(f"sort exited {proc.returncode} while merging {len(parts)} table pieces")
+    if deduplicate:
+        qc["qc_removed"]["duplicate"] = qc["qc_removed"].get("duplicate", 0) + duplicates
+    if fasta is not None:
+        qc["reference_alignment"] = alleles.alignment_summary_from_counts(actions, fasta)
+    else:
+        qc["reference_alignment"] = {"performed": False, "reason": "no GRCh38 FASTA under <reference_root>/genome"}
+        qc["warnings"].append("REF/ALT not aligned to the GRCh38 reference: no FASTA found (run src/reference_data/download_fasta_and_chains.sh)")
+    check_output_rows(written, record, qc)
+    qc["lambda_gc"] = gwas_stats.lambda_gc(np.frombuffer(lp_values, dtype="float64") if written else np.array([]))
+    timings["sort_merge_deduplicate"] = time.perf_counter() - started
+    started = time.perf_counter()
+    gwas_vcf.bgzip_and_index(plain, vcf_path)
+    timings["compress_and_index"] = time.perf_counter() - started
+
+
+def _merge_counts(a: Any, b: Any) -> Any:
+    """Pool a piece's QC value into the running total: counts add, dicts merge, lists union; anything else keeps the first."""
+    if a is None:
+        return b
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a
+    if isinstance(a, (int, np.integer)) and isinstance(b, (int, np.integer)):
+        return int(a) + int(b)
+    if isinstance(a, dict) and isinstance(b, dict):
+        return {k: _merge_counts(a.get(k), b.get(k)) for k in dict.fromkeys([*a, *b])}
+    if isinstance(a, list) and isinstance(b, list):
+        if any(isinstance(x, dict) for x in a + b):  # e.g. one entry per configured exclusion file, in config order
+            return [_merge_counts(x, y) for x, y in zip(a, b)] if len(a) == len(b) else a
+        return list(dict.fromkeys([*a, *b]))
+    return a
+
+
+def merge_piece_qc(qc: dict[str, Any], results: list[dict[str, Any]], record: dict[str, Any]) -> dict[str, float]:
+    """Pool the pieces' QC into `qc`; returns the pooled frequency moments. Fails if pieces disagree on the build."""
+    builds = {r["decisions"]["build"] for r in results if r["decisions"].get("build")}
+    if len(builds) > 1:
+        raise config_error(f"Row {record.get('study_id')}/{record.get('output_id')}: pieces of the table match different "
+                           f"genome builds ({', '.join(sorted(builds))}). Set input_build in the manifest or study YAML.")
+    moments = {"n": 0, "mean_x": 0.0, "mean_y": 0.0, "m2_x": 0.0, "m2_y": 0.0, "c_xy": 0.0, "far": 0}
+    for result in results:
+        moments = alleles.combine_af_moments(moments, result["moments"])
+        for key, value in result["qc"].items():
+            if key in FIRST_PIECE_ONLY:
+                qc.setdefault(key, value)
+            elif key == "coordinate_source":
+                qc[key] = value if qc.get(key) in (None, "input") else qc[key]
+            else:
+                qc[key] = _merge_counts(qc.get(key), value)
+    conflicts = qc.pop("rsid_chromosome_conflicts", 0)
+    if conflicts:
+        qc["warnings"].append(f"{conflicts} rsIDs map to a different chromosome than the input reports; their coordinates were not filled")
+    unlifted = qc.pop("pos19_missing_variants", 0)
+    reason = qc.pop("pos19_missing_reason", "")
+    if unlifted:
+        qc["warnings"].append(f"{reason}; POS19 left missing for {unlifted} variants")
+    return moments
+
+
+_WORKER: dict[str, Any] = {}
+
+
+def _init_worker(reference_root: str, population: str, fasta_path: str) -> None:
+    _WORKER["lookup"], _ = alleles.read_reference_lookup(reference_root, population)
+    _WORKER["fasta"] = alleles.Fasta(fasta_path) if fasta_path else None
+
+
+def _piece_in_worker(df: pd.DataFrame, settings: dict[str, Any], part: str) -> dict[str, Any]:
+    return standardise_piece(df, settings, _WORKER["lookup"], _WORKER["fasta"], Path(part))
+
+
+def run_pieces(pieces: Any, settings: dict[str, Any], lookup: pd.DataFrame, fasta: Any, work: Path, workers: int) -> list[dict[str, Any]]:
+    """Standardise the first piece here (it fixes the shared decisions), then the rest here or in `workers` processes."""
+    part = lambda i: work / f"piece-{i:06d}.txt"  # noqa: E731
+    pieces = iter(pieces)
+    results = [standardise_piece(next(pieces), settings, lookup, fasta, part(0))]
+    settings = {**settings, **results[0]["decisions"]}
+    if workers <= 1:
+        for i, df in enumerate(pieces, start=1):
+            results.append(standardise_piece(df, settings, lookup, fasta, part(i)))
+            settings["build"] = settings["build"] or results[-1]["decisions"]["build"]
+        return results
+    context = multiprocessing.get_context("spawn")  # fork is unsafe on macOS; workers load the cached lookup themselves
+    initargs = (settings["reference_root"], settings["population"], str(fasta.path) if fasta is not None else "")
+    with ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=_init_worker, initargs=initargs) as pool:
+        pending: set[Any] = set()
+        for i, df in enumerate(pieces, start=1):
+            if len(pending) >= workers:  # at most `workers` pieces in flight, so memory stays bounded
+                done, pending = wait(pending, return_when=FIRST_COMPLETED)
+                results.extend(future.result() for future in done)
+            pending.add(pool.submit(_piece_in_worker, df, settings, str(part(i))))
+            del df
+        results.extend(future.result() for future in wait(pending).done)
+    return results
+
+
+def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any], reference_root: str,
+                      analysis_qc: bool, lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any], population: str = "ALL",
+                      workers: int = 1) -> None:
+    sep = normalize_delimiter_value(config.get("delimiter")) or infer_delimiter(raw_path)
+    usecols = candidate_columns(raw_path, sep, config)
+    qc["input_delimiter"] = sep
+    chunk_rows = table_chunk_rows(config)
+    settings = {"config": config, "record": record, "reference_root": reference_root, "analysis_qc": bool(analysis_qc),
+                "population": population}
+    vcf_path.parent.mkdir(parents=True, exist_ok=True)
+    work = make_work_dir()
+    try:
+        started = time.perf_counter()
+        pieces = read_pieces(raw_path, sep, usecols, chunk_rows, config)
+        results = sorted(run_pieces(pieces, settings, lookup, fasta, work, workers), key=lambda r: r["part"])
+        wall = {"read_and_standardise_pieces": time.perf_counter() - started}
+        qc["table_pieces"] = {"pieces": len(results), "rows_per_piece": chunk_rows or "all", "workers": workers}
+        moments = merge_piece_qc(qc, results, record)
+        qc["analysis_qc"] = bool(analysis_qc)
+        check_af_concordance(moments, qc)
+        dedup = bool(analysis_qc) and bool(qc.get("analysis_qc_settings", {}).get("deduplicate", True))
+        merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, results[0]["decisions"]["extras"],
+                     dedup, fasta, qc, wall)
+        per_step: dict[str, float] = {}
+        for result in results:
+            for step, seconds in result["timings"].items():
+                per_step[step] = per_step.get(step, 0.0) + seconds
+        qc["timings_s"] = {"wall": {k: round(v, 1) for k, v in wall.items()},
+                           "piece_steps_summed_over_pieces": {k: round(v, 1) for k, v in per_step.items()}}
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     qc["input_format"] = "table"
 
 
@@ -747,9 +1048,10 @@ def lift_passthrough_body(raw_path: Path, plain_path: Path, header_lines: list[s
                            "(see src/reference_data/download_fasta_and_chains.sh).")
     if build == "GRCh38" and lifter is None:
         qc["warnings"].append(f"{reason}; POS19 left missing")
-    counts = {"non_primary_chromosome": 0, "bad_position": 0, "minus_strand": 0, "minus_strand_non_snv_dropped": 0}
+    counts = {"malformed_record": 0, "non_primary_chromosome": 0, "bad_position": 0, "minus_strand": 0,
+              "minus_strand_non_snv_dropped": 0}
     status_counts: dict[str, int] = {}
-    written = rounded = 0
+    written = rounded = records = 0
 
     def flush(chunk: list[list[str]], handle) -> None:
         nonlocal written, rounded
@@ -812,7 +1114,9 @@ def lift_passthrough_body(raw_path: Path, plain_path: Path, header_lines: list[s
             if line.startswith("#") or not line.strip():
                 continue
             fields = line.rstrip("\n").split("\t")
+            records += 1
             if len(fields) < 8:
+                counts["malformed_record"] += 1
                 continue
             chrom = normalize_chromosome(fields[0])
             if pd.isna(chrom) or str(chrom) not in PRIMARY_CHROMS:
@@ -829,6 +1133,8 @@ def lift_passthrough_body(raw_path: Path, plain_path: Path, header_lines: list[s
                 chunk = []
         flush(chunk, handle)
     key = "hg19_to_hg38" if build == "GRCh37" else "hg38_to_hg19"
+    qc["input_rows"] = records
+    qc["lifted_rows"] = written
     qc["sample_size_filled_records"] = counts.pop("sample_size_filled_records", 0)
     missing_ss = counts.pop("records_without_ss", 0)
     if missing_ss:
@@ -930,6 +1236,7 @@ def rewrite_passthrough_body(plain_path: Path, final_path: Path, header_count: i
     chunk_size = int(os.environ.get("GWAS_PASSTHROUGH_CHUNK", PASSTHROUGH_CHUNK))
     removed: dict[str, int] = {}
     palindromic: dict[str, int] = {}
+    maf_detail: dict[str, int] = {}
     actions: dict[str, int] = {}
     lp_parts: list[np.ndarray] = []
     carry: set[tuple[int, str, str]] = set()
@@ -957,6 +1264,7 @@ def rewrite_passthrough_body(plain_path: Path, final_path: Path, header_count: i
                 oa[kept.index.to_numpy()] = kept["OA"].to_numpy(dtype=object)
                 _add_counts(removed, chunk_qc["qc_removed"])
                 _add_counts(palindromic, chunk_qc.get("palindromic_resolution", {}))
+                _add_counts(maf_detail, chunk_qc.get("maf_detail", {}))
                 qc["analysis_qc_settings"] = chunk_qc["analysis_qc_settings"]
                 if dedup:
                     key = coords.position_key(canon["CHR"], canon["POS38"])
@@ -986,6 +1294,8 @@ def rewrite_passthrough_body(plain_path: Path, final_path: Path, header_count: i
     if analysis_qc:
         qc["qc_removed"] = removed
         qc["palindromic_resolution"] = palindromic
+        if maf_detail:
+            qc["maf_detail"] = maf_detail
     if fasta is not None:
         expanded = np.concatenate([np.full(v, k, dtype=object) for k, v in actions.items()]) if actions else np.array([], dtype=object)
         qc["reference_alignment"] = alleles.alignment_summary(expanded, fasta)
@@ -1092,6 +1402,8 @@ def main() -> None:
     parser.add_argument("--force", default="false")
     parser.add_argument("--dry-run", default="false")
     parser.add_argument("--analysis-qc", default="false")
+    parser.add_argument("--workers", type=int, default=int(os.environ.get("GWAS_WORKERS", "1") or 1),
+                        help="processes standardising pieces of a table in parallel (each holds its own reference lookup)")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -1121,6 +1433,7 @@ def main() -> None:
             write_json(args.output, result)
             return
     qc_json.unlink(missing_ok=True)  # a failed regeneration must not look complete
+    output_prefix.with_suffix(".steps.txt").unlink(missing_ok=True)
 
     gwas_vcf.require_htslib()
     raw_path = Path(record["raw_path"])
@@ -1145,9 +1458,14 @@ def main() -> None:
     if use_passthrough(raw_path, config):
         standardise_existing_vcf(raw_path, standard_vcf, record, config, args.reference_root, analysis_qc, lookup, fasta, qc)
     else:
-        standardise_table(raw_path, standard_vcf, record, config, args.reference_root, analysis_qc, lookup, fasta, qc)
+        standardise_table(raw_path, standard_vcf, record, config, args.reference_root, analysis_qc, lookup, fasta, qc,
+                          population=population, workers=max(1, args.workers))
     qc["coordinate_build"] = "GRCh38"
     qc["completed_at"] = utc_now()
+    qc["steps"] = gwas_steps.build_steps(qc)
+    steps_log = output_prefix.with_suffix(".steps.txt")
+    steps_log.write_text(gwas_steps.format_steps(qc, record), encoding="utf-8")
+    print(steps_log.read_text(encoding="utf-8"), file=sys.stderr)
     metadata = {
         "study_id": record["study_id"], "output_id": record["output_id"], "phenotype": record["phenotype"],
         "ancestry": record["ancestry"], "sex": record.get("sex", ""), "author": record["author"], "year": record["year"],
@@ -1157,7 +1475,8 @@ def main() -> None:
     }
     write_json(metadata_json, metadata)
     write_json(qc_json, qc)
-    write_json(args.output, build_record(record, standard_vcf, standard_index, metadata_json, qc_json, plot, qc))
+    write_json(args.output, {**build_record(record, standard_vcf, standard_index, metadata_json, qc_json, plot, qc),
+                             "steps_log": str(steps_log)})
 
 
 if __name__ == "__main__":

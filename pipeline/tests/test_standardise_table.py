@@ -304,7 +304,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = sorted(p.name for p in Path(result.record["standard_vcf"]).parent.iterdir())
         self.assertEqual(outputs, ["standardised.gwas.vcf.gz", "standardised.gwas.vcf.gz.tbi", "standardised.metadata.json",
-                                   "standardised.qc.json"])
+                                   "standardised.qc.json", "standardised.steps.txt"])
         self.assertEqual(list(scratch.iterdir()), [])
 
     def test_genomic_inflation_and_provenance_are_recorded(self):

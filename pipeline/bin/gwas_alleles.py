@@ -9,8 +9,10 @@ drives palindromic strand decisions.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -76,6 +78,7 @@ def read_reference_lookup(reference_root: str | Path, population: str) -> tuple[
 
     Returns (prepared lookup, population actually used; "" when nothing was found). The file is read in
     chunks into the compact form of prepare_lookup; legacy columns (SNPID, EAF_<pop>, POS38) are ignored.
+    The prepared form is cached beside the file (<population>.prepared/) and reused while the file is unchanged.
     """
     root = Path(reference_root) / "1000genomes" / "phase3" / "lookup"
     for pop in dict.fromkeys([str(population or "ALL").upper(), "ALL"]):
@@ -83,16 +86,72 @@ def read_reference_lookup(reference_root: str | Path, population: str) -> tuple[
             path = root / f"{pop}{suffix}"
             if not path.exists():
                 continue
-            header = pd.read_csv(path, sep="\t", nrows=0).columns
-            usecols = [c for c in LOOKUP_COLUMNS if c in header]
-            chunks = [prepare_lookup(chunk) for chunk in pd.read_csv(
-                path, sep="\t", usecols=usecols, low_memory=False, chunksize=LOOKUP_CHUNK,
-                dtype={c: str for c in ("CHR", "SNP", "A1", "A2") if c in usecols})]
-            table = pd.concat(chunks, ignore_index=True) if chunks else prepare_lookup(pd.DataFrame(columns=usecols))
-            for column in ("CHR", "A1", "A2"):
-                table[column] = pd.Categorical(table[column].astype(object))
+            cache, stamp = root / f"{pop}.prepared", _source_stamp(path)
+            table = _load_prepared(cache, stamp)
+            if table is None:
+                table = _read_and_prepare(path)
+                _save_prepared(cache, table, stamp)
             return table, pop
     return prepare_lookup(pd.DataFrame(columns=LOOKUP_COLUMNS)), ""
+
+
+def _read_and_prepare(path: Path) -> pd.DataFrame:
+    header = pd.read_csv(path, sep="\t", nrows=0).columns
+    usecols = [c for c in LOOKUP_COLUMNS if c in header]
+    chunks = [prepare_lookup(chunk) for chunk in pd.read_csv(
+        path, sep="\t", usecols=usecols, low_memory=False, chunksize=LOOKUP_CHUNK,
+        dtype={c: str for c in ("CHR", "SNP", "A1", "A2") if c in usecols})]
+    table = pd.concat(chunks, ignore_index=True) if chunks else prepare_lookup(pd.DataFrame(columns=usecols))
+    for column in CATEGORY_COLUMNS:
+        table[column] = pd.Categorical(table[column].astype(object))
+    return table
+
+
+CATEGORY_COLUMNS = ("CHR", "A1", "A2")
+NUMERIC_COLUMNS = ("RS", "POS19", "AF1", "KEY")
+PREPARED_CACHE_VERSION = 1  # bump when prepare_lookup changes what it produces
+
+
+def _source_stamp(path: Path) -> dict[str, Any]:
+    stat = path.stat()
+    return {"version": PREPARED_CACHE_VERSION, "source": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _load_prepared(cache: Path, stamp: dict[str, Any]) -> pd.DataFrame | None:
+    """The cached prepared lookup, or None when it is missing, unreadable or made from a different file."""
+    try:
+        meta = json.loads((cache / "meta.json").read_text(encoding="utf-8"))
+        if meta.get("stamp") != stamp:
+            return None
+        columns: dict[str, Any] = {name: np.load(cache / f"{name}.npy", allow_pickle=False) for name in NUMERIC_COLUMNS}
+        for name in CATEGORY_COLUMNS:
+            codes = np.load(cache / f"{name}.codes.npy", allow_pickle=False)
+            columns[name] = pd.Categorical.from_codes(codes, categories=meta["categories"][name])
+        return pd.DataFrame(columns)[PREPARED_COLUMNS]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _save_prepared(cache: Path, table: pd.DataFrame, stamp: dict[str, Any]) -> None:
+    """Write the cache atomically; silently skipped when the reference folder is read-only."""
+    categories = {name: list(table[name].cat.categories) for name in CATEGORY_COLUMNS}
+    if not all(isinstance(v, str) for values in categories.values() for v in values):
+        return
+    tmp = cache.with_name(f".{cache.name}.tmp-{os.getpid()}")
+    try:
+        tmp.mkdir(parents=True, exist_ok=True)
+        for name in NUMERIC_COLUMNS:
+            np.save(tmp / f"{name}.npy", table[name].to_numpy())
+        for name in CATEGORY_COLUMNS:
+            np.save(tmp / f"{name}.codes.npy", table[name].cat.codes.to_numpy())
+        (tmp / "meta.json").write_text(json.dumps({"stamp": stamp, "categories": categories}) + "\n", encoding="utf-8")
+        if cache.exists():
+            shutil.rmtree(cache, ignore_errors=True)
+        os.rename(tmp, cache)
+    except OSError:
+        pass  # read-only reference folder, or another process won the race: the next run reads or rebuilds it
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def lookup_has_alleles(lookup: pd.DataFrame) -> bool:
@@ -241,15 +300,30 @@ def resolve_palindromic_strand(frame: pd.DataFrame, settings: dict[str, Any], qc
 
 def deduplicate(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     """Keep the first record per (CHR, POS38, unordered allele pair); never keyed on rsID."""
-    ea, oa = upper_alleles(frame["EA"]).to_numpy(), upper_alleles(frame["OA"]).to_numpy()
-    first = ea <= oa
-    key = pd.DataFrame({"KEY": position_key(frame["CHR"], frame["POS38"]), "LOW": np.where(first, ea, oa),
-                        "HIGH": np.where(first, oa, ea)})
+    low, high = dedup_alleles(frame)
+    key = pd.DataFrame({"KEY": position_key(frame["CHR"], frame["POS38"]), "LOW": low, "HIGH": high})
     duplicate = key.duplicated(keep="first").to_numpy()
     return frame[~duplicate], int(duplicate.sum())
 
 
-def apply_analysis_qc(frame: pd.DataFrame, config_settings: dict[str, Any] | None, qc: dict[str, Any]) -> pd.DataFrame:
+def dedup_alleles(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    """The unordered allele pair (LOW, HIGH) that deduplicate() keys on, with CHR and POS38."""
+    ea, oa = upper_alleles(frame["EA"]).to_numpy(), upper_alleles(frame["OA"]).to_numpy()
+    first = ea <= oa
+    return np.where(first, ea, oa), np.where(first, oa, ea)
+
+
+def apply_analysis_qc(frame: pd.DataFrame, config_settings: dict[str, Any] | None, qc: dict[str, Any],
+                      deduplicate_rows: bool = True) -> pd.DataFrame:
+    """Analysis filters in order: biallelic SNPs, MAF, palindromic strand resolution, deduplication.
+
+    MAF runs before the palindromic check so that rare palindromic SNPs are counted as rare (the lookup holds
+    only SNPs with MAF >= 0.01, so they would otherwise be counted as palindromes without a reference). The
+    filters are independent row by row, so the order changes only which filter a row is counted against.
+
+    With deduplicate_rows=False the duplicate count is 0 and the caller deduplicates (pieces of a table
+    are deduplicated together after they are merged).
+    """
     settings = {**ANALYSIS_QC_DEFAULTS, **(config_settings or {})}
     removed: dict[str, int] = {}
     out = frame
@@ -258,34 +332,68 @@ def apply_analysis_qc(frame: pd.DataFrame, config_settings: dict[str, Any] | Non
         keep = (ea.isin(list("ACGT")) & oa.isin(list("ACGT")) & (ea != oa)).to_numpy()
         removed["non_biallelic"] = int((~keep).sum())
         out = out[keep]
-    if settings.get("remove_palindromic", True):
-        out, dropped = resolve_palindromic_strand(out, settings, qc)
-        removed["palindromic"] = dropped
     if settings.get("maf", True):
         threshold = float(settings.get("maf_threshold", 0.01))
         eaf = numeric_series(out["EAF"]).to_numpy(dtype="float64")
         maf = np.minimum(eaf, 1.0 - eaf)
-        keep = np.isfinite(eaf) & (eaf >= 0) & (eaf <= 1) & (maf >= threshold)
+        valid = np.isfinite(eaf) & (eaf >= 0) & (eaf <= 1)
+        keep = valid & (maf >= threshold)
         removed[f"maf_below_{threshold}"] = int((~keep).sum())
+        qc["maf_detail"] = {"below_threshold": int((valid & ~keep).sum()), "no_valid_frequency": int((~valid).sum())}
         out = out[keep]
+    if settings.get("remove_palindromic", True):
+        out, dropped = resolve_palindromic_strand(out, settings, qc)
+        removed["palindromic"] = dropped
     if settings.get("deduplicate", True):
-        out, removed["duplicate"] = deduplicate(out)
+        if deduplicate_rows:
+            out, removed["duplicate"] = deduplicate(out)
+        else:
+            removed["duplicate"] = 0
     qc["qc_removed"] = removed
     qc["analysis_qc_settings"] = settings
     return out
 
 
-def af_concordance(frame: pd.DataFrame) -> dict[str, Any]:
-    """Correlation of study EAF with the reference frequency of the same allele (non-palindromic SNPs)."""
+def af_moments(frame: pd.DataFrame) -> dict[str, float]:
+    """Sufficient statistics for af_concordance over the rows of one frame (combine with combine_af_moments)."""
     ref_af = reference_af_of_effect_allele(frame)
     eaf = numeric_series(frame["EAF"]).to_numpy(dtype="float64")
     use = (eaf_source(frame) == "input") & np.isfinite(eaf) & np.isfinite(ref_af) & ~is_palindromic(frame["EA"], frame["OA"])
-    n = int(use.sum())
+    x, y = eaf[use], ref_af[use]
+    if not len(x):
+        return {"n": 0, "mean_x": 0.0, "mean_y": 0.0, "m2_x": 0.0, "m2_y": 0.0, "c_xy": 0.0, "far": 0}
+    mx, my = float(np.mean(x)), float(np.mean(y))
+    return {"n": int(len(x)), "mean_x": mx, "mean_y": my, "m2_x": float(np.sum((x - mx) ** 2)),
+            "m2_y": float(np.sum((y - my) ** 2)), "c_xy": float(np.sum((x - mx) * (y - my))),
+            "far": int(np.sum(np.abs(x - y) > 0.2))}
+
+
+def combine_af_moments(a: dict[str, float], b: dict[str, float]) -> dict[str, float]:
+    """Pool two sets of moments (Chan et al. pairwise update), so pieces of a table give the whole-table result."""
+    if not a["n"]:
+        return dict(b)
+    if not b["n"]:
+        return dict(a)
+    n = a["n"] + b["n"]
+    dx, dy = b["mean_x"] - a["mean_x"], b["mean_y"] - a["mean_y"]
+    w = a["n"] * b["n"] / n
+    return {"n": n, "mean_x": a["mean_x"] + dx * b["n"] / n, "mean_y": a["mean_y"] + dy * b["n"] / n,
+            "m2_x": a["m2_x"] + b["m2_x"] + dx * dx * w, "m2_y": a["m2_y"] + b["m2_y"] + dy * dy * w,
+            "c_xy": a["c_xy"] + b["c_xy"] + dx * dy * w, "far": a["far"] + b["far"]}
+
+
+def af_concordance_from_moments(m: dict[str, float]) -> dict[str, Any]:
+    n = int(m["n"])
     result: dict[str, Any] = {"n": n, "pearson_r": None, "frac_abs_diff_gt_0.2": None}
-    if n >= 3 and np.std(eaf[use]) > 0 and np.std(ref_af[use]) > 0:
-        result["pearson_r"] = float(np.corrcoef(eaf[use], ref_af[use])[0, 1])
-        result["frac_abs_diff_gt_0.2"] = float(np.mean(np.abs(eaf[use] - ref_af[use]) > 0.2))
+    if n >= 3 and m["m2_x"] > 0 and m["m2_y"] > 0:
+        result["pearson_r"] = float(max(-1.0, min(1.0, m["c_xy"] / np.sqrt(m["m2_x"] * m["m2_y"]))))
+        result["frac_abs_diff_gt_0.2"] = float(m["far"] / n)
     return result
+
+
+def af_concordance(frame: pd.DataFrame) -> dict[str, Any]:
+    """Correlation of study EAF with the reference frequency of the same allele (non-palindromic SNPs)."""
+    return af_concordance_from_moments(af_moments(frame))
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -434,6 +542,10 @@ def reference_alignment(chrom: pd.Series, pos: pd.Series, ea: pd.Series, oa: pd.
 
 def alignment_summary(action: np.ndarray, fasta: Fasta) -> dict[str, Any]:
     counts = {str(k): int(v) for k, v in zip(*np.unique(action, return_counts=True))} if len(action) else {}
+    return alignment_summary_from_counts(counts, fasta)
+
+
+def alignment_summary_from_counts(counts: dict[str, int], fasta: Fasta) -> dict[str, Any]:
     return {
         "performed": True, "fasta": str(fasta.path), "kept": counts.get("keep", 0),
         "swapped": counts.get("swap", 0) + counts.get("complement_swap", 0),
@@ -445,6 +557,12 @@ def alignment_summary(action: np.ndarray, fasta: Fasta) -> dict[str, Any]:
 
 def align_table_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Orient each variant so OA (written as REF) is the GRCh38 base; flip BETA and EAF when alleles swap."""
+    out, action = orient_to_reference(frame, fasta)
+    return out[action != "drop"], alignment_summary(action, fasta)
+
+
+def orient_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame, np.ndarray]:
+    """align_table_to_reference without dropping: every row, oriented, with its action ('drop' rows unchanged)."""
     action = reference_alignment(frame["CHR"], frame["POS38"], frame["EA"], frame["OA"], fasta)["action"].to_numpy()
     out = frame.copy()
     complement = np.isin(action, ["complement", "complement_swap"])
@@ -458,4 +576,4 @@ def align_table_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.Data
         out.loc[swap, "OA"] = ea_before
         out.loc[swap, "BETA"] = -numeric_series(out.loc[swap, "BETA"])
         out.loc[swap, "EAF"] = 1.0 - numeric_series(out.loc[swap, "EAF"])
-    return out[action != "drop"], alignment_summary(action, fasta)
+    return out, action
