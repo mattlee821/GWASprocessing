@@ -77,7 +77,8 @@ def main() -> None:
     if dry_run:
         raw_path = raw_dir / sanitize_filename(guess_filename_from_url(location, row["output_id"]))
     elif source_type == "gwas_catalog":
-        metadata.update(download_gwas_catalog(location, raw_dir, row.get("PMID", "")))
+        prefer = str(config.get("gwas_catalog_file", "raw") or "raw").strip().lower()
+        metadata.update(download_gwas_catalog(location, raw_dir, row.get("PMID", ""), "harmonised" if prefer == "harmonised" else "raw"))
         raw_path = Path(metadata["raw_path"])
     elif source_type == "opengwas":
         metadata.update(download_opengwas(location, raw_dir))

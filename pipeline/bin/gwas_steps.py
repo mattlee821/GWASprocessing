@@ -64,6 +64,9 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
     ids = qc.get("variant_id_normalisation", {}) or {}
     p_source = qc.get("p_value_source", {}) or {}
     derivations = qc.get("derivations", {}) or {}
+    fallback = qc.get("gwas_catalog_fallback") or {}
+    read_notes = [f"the raw GWAS Catalog file {fallback.get('raw_file')} could not be standardised (exit "
+                  f"{fallback.get('exit_code')}); the harmonised file {fallback.get('harmonised_file')} was used"] if fallback else []
     rows = _step(steps, rows, "Read input",
                  "Records read from the source GWAS-VCF, 1 row per ALT allele." if vcf else "Rows read from the source table.",
                  None,
@@ -72,7 +75,7 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                   "LP computed from BETA/SE because P was 0 or missing": _n(p_source.get("from_z")),
                   "effect sizes from odds ratios": _n(derivations.get("beta_from_or")),
                   "standard errors from confidence intervals": _n(derivations.get("se_from_ci")),
-                  "standard errors from P and effect size": _n(derivations.get("se_from_p"))})
+                  "standard errors from P and effect size": _n(derivations.get("se_from_p"))}, read_notes)
     exclusions = qc.get("exclusions") or []
     if exclusions:
         rows = _step(steps, rows, "Configured exclusions", "Variants listed in exclusion files named in the study YAML.",
@@ -129,12 +132,13 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
     alignment = qc.get("reference_alignment", {}) or {}
     if alignment.get("performed"):
         rows = _step(steps, rows, "GRCh38 reference alignment",
-                     "REF must match the GRCh38 genome: alleles are swapped or complemented to match it, and SNVs that match on "
-                     "neither strand are removed.",
-                     {"alleles match neither strand of the GRCh38 base": _n(alignment.get("dropped_mismatch"))},
+                     "REF must match the GRCh38 genome: alleles are swapped or complemented to match it, SNVs that match on "
+                     "neither strand and indels that do not match the sequence are removed, and indels are left-aligned.",
+                     {"alleles match neither strand of the GRCh38 base": _n(alignment.get("dropped_mismatch")),
+                      "indel alleles do not match the GRCh38 sequence": _n(alignment.get("indels_unmatched_dropped"))},
                      {"already aligned": _n(alignment.get("kept")), "effect and other allele swapped": _n(alignment.get("swapped")),
                       "complemented to the forward strand": _n(alignment.get("strand_flipped")),
-                      "indels kept without a REF check": _n(alignment.get("indels_unmatched_kept")),
+                      "indels left-aligned and trimmed": _n(qc.get("indels_left_aligned")),
                       "kept, reference base unavailable": _n(alignment.get("unalignable_kept"))})
     output = _n(qc.get("output_rows"))
     if rows is not None and rows != output:

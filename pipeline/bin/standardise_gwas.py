@@ -38,6 +38,7 @@ import pandas as pd
 
 import gwas_alleles as alleles
 import gwas_coordinates as coords
+import gwas_reference as grch38
 import gwas_stats
 import gwas_steps
 import gwas_vcf
@@ -69,7 +70,10 @@ from gwas_pipeline_common import (
     ancestry_to_population,
     complement_alleles,
     config_error,
+    EXIT_CONFIG,
+    EXIT_DATA,
     data_error,
+    download_url,
     ensure_dir,
     infer_delimiter,
     is_gwas_vcf,
@@ -100,7 +104,7 @@ FIELD_ALIASES = {
 FAMILY_FIELDS = ("EA", "OA", "BETA", "EAF", "OR", "CI_LOWER", "CI_UPPER", "CHR", "POS")
 KNOWN_CONFIG_KEYS = {"description", "input_build", "delimiter", "columns", "exclude", "exclusions", "joins",
                      "transforms", "extras", "format", "reference_population", "palindromic_tolerance", "sample",
-                     "study_type", "ncase", "ncontrol", "sample_size", "_config_path"}
+                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "_config_path"}
 KNOWN_TRANSFORMS = {"strip_hash_header", "uppercase_alleles", "derive_oa_from_ref_alt"}
 REQUIRED_FIELDS = ("CHR", "POS38", "EA", "OA", "BETA", "SE", "LP")
 RETENTION_WARNING = 0.5
@@ -415,6 +419,20 @@ def fill_positions_from_ids(out: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFra
     return out
 
 
+def detect_build_paired(rows: pd.DataFrame, paired: dict[str, Any]) -> dict[str, Any]:
+    """Count a fixed-seed sample of rows matching the same common SNPs placed in GRCh37 and in GRCh38; a build is
+    called when its hits are at least 10 times the other's (the minimum count is applied by the caller)."""
+    sample = rows if len(rows) <= coords.DETECTION_SAMPLE else rows.sample(n=coords.DETECTION_SAMPLE, random_state=coords.DETECTION_SEED)
+    hits = {build: grch38.build_hits(paired[build], sample["CHR"], sample["POS"], sample["EA"], sample["OA"]) for build in ("hg19", "hg38")}
+    result = {"build": "", "hits_hg19": hits["hg19"], "hits_hg38": hits["hg38"], "sampled": int(len(sample)),
+              "method_detail": "paired GRCh37/GRCh38 sample of common 1000 Genomes SNPs"}
+    if hits["hg19"] > 0 and hits["hg19"] >= 10 * hits["hg38"]:
+        result["build"] = "hg19"
+    elif hits["hg38"] > 0 and hits["hg38"] >= 10 * hits["hg19"]:
+        result["build"] = "hg38"
+    return result
+
+
 def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[str, Any], lookup: pd.DataFrame,
                         reference_root: str, qc: dict[str, Any]) -> str:
     """The input build, detected from the data in the first instance: a fixed-seed sample of positions and alleles
@@ -424,7 +442,10 @@ def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[
     declared, declared_source = declared_build(record, config)
     rows = out[np.isfinite(out["POS"]) & ~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])]
     detection: dict[str, Any] = {"build": "", "reason": "reference lookup without alleles"}
-    if alleles.lookup_has_alleles(lookup):
+    paired = grch38.paired_build_sample(reference_root)
+    if paired is not None:
+        detection = detect_build_paired(rows, paired)
+    elif alleles.lookup_has_alleles(lookup):
         lifter, _ = coords.load_liftover(reference_root, "hg38", "hg19")
         detection = coords.detect_build(rows["CHR"], rows["POS"], rows["EA"], rows["OA"], lookup, lifter)
     qc["build_detection"] = {**detection, "declared": declared, "declared_source": declared_source}
@@ -448,6 +469,28 @@ def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[
         )
     qc["build_detection"].update({"build": declared, "method": "declared"})
     return declared
+
+
+def fill_coordinates_from_dbsnp(out: pd.DataFrame, dbsnp: Any, qc: dict[str, Any]) -> pd.DataFrame:
+    """GRCh38 chromosome and position straight from dbSNP for rows with an rsID and no position (no liftover)."""
+    fills = qc.setdefault("reference_fills", {})
+    fills.setdefault("POS38", 0)
+    snp = out["SNP"].astype("string")
+    need = (~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])).to_numpy() & snp.str.match(r"^rs\d+$").fillna(False).to_numpy(dtype=bool)
+    qc["coordinate_source"] = qc.get("coordinate_source") or ("dbsnp" if need.any() else "input")
+    if not need.any():
+        return out
+    code, pos = dbsnp.positions(coords.rs_number(out.loc[need, "SNP"]))
+    found_chr = np.array([grch38.CHROMS[c - 1] if c > 0 else "" for c in code], dtype=object)
+    current = out.loc[need, "CHR"]
+    chr_ok = current.isna().to_numpy() | (current.astype(str).to_numpy() == found_chr)
+    use = (code > 0) & chr_ok
+    rows = out.index[need][use]
+    out.loc[rows, "CHR"] = found_chr[use]
+    out.loc[rows, "POS38"] = pos[use].astype("float64")
+    fills["POS38"] += int(use.sum())
+    qc["rsid_chromosome_conflicts"] = qc.get("rsid_chromosome_conflicts", 0) + int(((code > 0) & ~chr_ok).sum())
+    return out
 
 
 def fill_coordinates_by_rsid(out: pd.DataFrame, reference_root: str, lookup: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFrame:
@@ -490,8 +533,8 @@ def _snv_mask(ea: pd.Series, oa: pd.Series) -> np.ndarray:
     return (ea.isin(list("ACGT")) & oa.isin(list("ACGT"))).to_numpy()
 
 
-def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, Any]) -> pd.DataFrame:
-    """Give every row a lifted GRCh38 POS38 (dropping failures) and, where possible, a GRCh37 POS19."""
+def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, Any], need_pos19: bool = True) -> pd.DataFrame:
+    """Give every row a lifted GRCh38 POS38 (dropping failures) and, where needed (the GRCh37 lookup), a GRCh37 POS19."""
     out = out.copy()
     out["LIFT_STRAND"] = "+"
     report = qc.setdefault("liftover", {})
@@ -516,7 +559,7 @@ def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, A
         out.loc[rows[minus], "LIFT_STRAND"] = "-"
         report["hg19_to_hg38"] = {**result.counts(), "minus_strand": int(minus.sum()), "minus_strand_non_snv_dropped": int((minus & ~snv).sum())}
     need19 = (~np.isfinite(out["POS19"]) & np.isfinite(out["POS38"])).to_numpy()
-    if need19.any():
+    if need_pos19 and need19.any():
         lifter, reason = coords.load_liftover(reference_root, "hg38", "hg19")
         if lifter is None:
             qc["pos19_missing_reason"] = reason
@@ -588,10 +631,14 @@ def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any], maf_threshold: f
     return out[keep]
 
 
-def annotate_with_reference(out: pd.DataFrame, lookup: pd.DataFrame, qc: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, float]]:
-    """Reference annotation and rsID/EAF fills; returns the frame and its allele-frequency concordance moments."""
-    out = alleles.annotate_with_reference(out, lookup)
-    out, rsid_fills = alleles.fill_missing_rsids(out)
+def annotate_with_reference(out: pd.DataFrame, lookup: pd.DataFrame, qc: dict[str, Any], freqs: Any = None) -> tuple[pd.DataFrame, dict[str, float]]:
+    """Reference annotation and EAF fills (GRCh38 1000 Genomes when installed, else the GRCh37 lookup, which also
+    fills rsIDs); returns the frame and its allele-frequency concordance moments."""
+    if freqs is not None:
+        out, rsid_fills = alleles.annotate_with_frequencies(out, freqs), 0
+    else:
+        out = alleles.annotate_with_reference(out, lookup)
+        out, rsid_fills = alleles.fill_missing_rsids(out)
     out, eaf_fills = alleles.fill_eaf_from_reference(out)
     fills = qc.setdefault("reference_fills", {})
     fills["rsid"], fills["EAF"] = rsid_fills, eaf_fills
@@ -726,22 +773,34 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
         out.loc[assign, target] = out.loc[assign, "POS"]
     out = out.drop(columns=["POS"])
     lap("positions_and_build")
-    out = fill_coordinates_by_rsid(out, reference_root, lookup, qc)
+    dbsnp, freqs, _ = grch38_references(reference_root, settings["population"])
+    if dbsnp is not None:
+        out = fill_coordinates_from_dbsnp(out, dbsnp, qc)
+    else:
+        out = fill_coordinates_by_rsid(out, reference_root, lookup, qc)
     lap("rsid_coordinates")
-    out = establish_dual_build(out, reference_root, qc)
+    out = establish_dual_build(out, reference_root, qc, need_pos19=freqs is None)
     lap("liftover")
     out = drop_incomplete_rows(out, qc)
-    out, moments = annotate_with_reference(out, lookup, qc)
+    out, moments = annotate_with_reference(out, lookup, qc, freqs)
     lap("reference_annotation")
     out = alleles.resolve_palindromic_strand(out, qc, settings["palindromic_tolerance"])
-    low, high = alleles.dedup_alleles(out)  # the key deduplication uses, before alignment can swap alleles
     lap("palindromic_strand")
     if fasta is not None:
         out, action = alleles.orient_to_reference(out, fasta)
+        out, moved = alleles.normalise_indels(out, fasta, action)
+        qc["indels_left_aligned"] = moved
     else:
         action = np.full(len(out), "unalignable", dtype=object)
+    low, high = alleles.dedup_alleles(out)  # unordered allele pair: the same variant reported either way round matches
     out["HM"] = harmonisation_action(out["PAL"].to_numpy(dtype=object), action)
     lap("grch38_alignment")
+    if dbsnp is not None:  # ID = the dbSNP rsID matching (CHR, POS38, REF = OA, ALT = EA) exactly, else none
+        found = dbsnp.rsids(out["CHR"].to_numpy(dtype=object), out["POS38"].to_numpy(dtype="float64"),
+                            out["OA"].to_numpy(dtype=object), out["EA"].to_numpy(dtype=object))
+        out["SNP"] = np.where(found > 0, np.char.add("rs", found.astype(str)).astype(object), None)
+        qc["rsid_dbsnp"] = {"matched": int((found > 0).sum()), "unmatched": int((found == 0).sum())}
+    lap("dbsnp_rsids")
     keys = settings.get("format_keys") or gwas_vcf.format_keys(c for c in gwas_vcf.OPTIONAL_FORMAT if cols.get(c))
     write_piece_lines(part, out, rows[out.index.to_numpy()], low, high, action, extras, keys, settings["afs_label"])
     lap("write_piece")
@@ -810,7 +869,7 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
                 continue
             seen.add((low, high))
             actions[action] = actions.get(action, 0) + 1
-            if action == "drop":
+            if action in alleles.REMOVED_ACTIONS:
                 continue
             out.write(record_line)
             lp_values.append(float(lp))
@@ -871,7 +930,8 @@ def sample_fields(record: dict[str, Any], config: dict[str, Any], qc: dict[str, 
     """The ##SAMPLE values: harmonisation counts that add up to TotalVariants, study type and totals, trait metadata."""
     total, written = int(qc.get("input_rows", 0)), int(qc.get("output_rows", 0))
     alignment = qc.get("reference_alignment", {}) or {}
-    not_harmonised = int(alignment.get("dropped_mismatch", 0) or 0) + int(qc.get("duplicates_removed", 0))
+    not_harmonised = int(alignment.get("dropped_mismatch", 0) or 0) + int(alignment.get("indels_unmatched_dropped", 0) or 0) \
+        + int(qc.get("duplicates_removed", 0))
     fields: dict[str, Any] = {
         "TotalVariants": total, "VariantsNotRead": total - written - not_harmonised, "HarmonisedVariants": written,
         "VariantsNotHarmonised": not_harmonised, "SwitchedAlleles": int(alignment.get("swapped", 0) or 0),
@@ -932,10 +992,24 @@ def merge_piece_qc(qc: dict[str, Any], results: list[dict[str, Any]], record: di
 
 
 _WORKER: dict[str, Any] = {}
+_GRCH38: dict[tuple[str, str], tuple[Any, Any, Any]] = {}
+
+
+def grch38_references(reference_root: str, population: str) -> tuple[Any, Any, Any]:
+    """(dbSNP index, 1000 Genomes frequencies, paired build-detection sample), each None when not installed.
+    Memory-mapped, opened once per process."""
+    key = (str(reference_root), str(population))
+    if key not in _GRCH38:
+        _GRCH38[key] = (grch38.Dbsnp.find(reference_root), grch38.Frequencies.find(reference_root, population),
+                        grch38.paired_build_sample(reference_root))
+    return _GRCH38[key]
 
 
 def _init_worker(reference_root: str, population: str, fasta_path: str) -> None:
-    _WORKER["lookup"], _ = alleles.read_reference_lookup(reference_root, population)
+    if grch38_references(reference_root, population)[1] is not None:
+        _WORKER["lookup"] = pd.DataFrame(columns=alleles.LOOKUP_COLUMNS)
+    else:
+        _WORKER["lookup"], _ = alleles.read_reference_lookup(reference_root, population)
     _WORKER["fasta"] = alleles.Fasta(fasta_path) if fasta_path else None
 
 
@@ -1138,6 +1212,31 @@ def provenance() -> dict[str, Any]:
     return info
 
 
+def standardise_with_fallback(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
+                              reference_root: str, lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any], **options: Any) -> Path:
+    """Standardise the staged file. A raw GWAS Catalog file that cannot be standardised (data or configuration error)
+    falls back to the Catalog's harmonised file, from a fresh QC record; the fallback is recorded. Returns the file used."""
+    base = {key: (list(value) if isinstance(value, list) else dict(value) if isinstance(value, dict) else value)
+            for key, value in qc.items()}
+    try:
+        standardise_table(raw_path, vcf_path, record, config, reference_root, lookup, fasta, qc, **options)
+        return raw_path
+    except SystemExit as exc:
+        metadata = record.get("metadata", {}) or {}
+        url = metadata.get("harmonised_url", "")
+        if exc.code not in (EXIT_DATA, EXIT_CONFIG) or metadata.get("source_type") != "gwas_catalog" \
+                or metadata.get("file_kind") != "raw" or not url:
+            raise
+        harmonised = download_url(url, raw_path.parent)
+        qc.clear()
+        qc.update(base)
+        qc["gwas_catalog_fallback"] = {"raw_file": raw_path.name, "harmonised_file": harmonised.name, "exit_code": exc.code}
+        qc["warnings"].append(f"the raw GWAS Catalog file {raw_path.name} could not be standardised (exit {exc.code}); "
+                              f"used the harmonised file {harmonised.name} instead")
+        standardise_table(harmonised, vcf_path, record, config, reference_root, lookup, fasta, qc, **options)
+        return harmonised
+
+
 def build_record(record: dict[str, Any], vcf: Path, index: Path, metadata: Path, qc_json: Path, plot: Path, qc: dict[str, Any]) -> dict[str, Any]:
     out = dict(record)
     out.update({"standard_vcf": str(vcf), "standard_index": str(index), "metadata_json": str(metadata), "qc_json": str(qc_json),
@@ -1193,20 +1292,26 @@ def main() -> None:
                           "settings_hash": fingerprint, "provenance": provenance(), "reference_fills": {}}
     validate_config_keys(config, qc)
     population = config.get("reference_population") or ancestry_to_population(record.get("ancestry", ""))
-    lookup, used = alleles.read_reference_lookup(args.reference_root, population)
+    _, freqs38, _ = grch38_references(args.reference_root, population)
+    if freqs38 is not None:
+        lookup, used = pd.DataFrame(columns=alleles.LOOKUP_COLUMNS), freqs38.population
+        qc["reference_frequencies"] = "1000 Genomes GRCh38 (2,504 unrelated phase 3 samples)"
+    else:
+        lookup, used = alleles.read_reference_lookup(args.reference_root, population)
     qc["reference_population"], qc["reference_population_used"] = population, used
     if not used:
         qc["warnings"].append(f"no 1000 Genomes lookup found under {args.reference_root}; no rsID/EAF fills or strand checks")
     elif used != population:
         qc["warnings"].append(f"lookup for population {population} not found; used {used}")
-    if used and lookup.empty:
+    if used and lookup.empty and freqs38 is None:
         qc["warnings"].append(f"the {used} reference lookup is empty")
-    elif used and not alleles.lookup_has_alleles(lookup):
+    elif used and freqs38 is None and not alleles.lookup_has_alleles(lookup):
         qc["warnings"].append("reference lookup lacks A1/A2/AF1; rebuild it with make_1000genomes_lookup_tables.py")
     fasta = alleles.Fasta.find(args.reference_root)
 
-    standardise_table(raw_path, standard_vcf, record, config, args.reference_root, lookup, fasta, qc,
-                      population=population, population_used=used or population, workers=max(1, args.workers))
+    used_path = standardise_with_fallback(raw_path, standard_vcf, record, config, args.reference_root, lookup, fasta, qc,
+                                          population=population, population_used=used or population, workers=max(1, args.workers))
+    record["raw_path"] = str(used_path)
     qc["coordinate_build"] = "GRCh38"
     qc["completed_at"] = utc_now()
     qc["steps"] = gwas_steps.build_steps(qc)

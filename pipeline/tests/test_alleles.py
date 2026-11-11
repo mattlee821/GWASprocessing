@@ -206,11 +206,24 @@ class ReferenceAlignmentTests(unittest.TestCase):
         cases = [  # (position, EA, OA, expected action)
             (1, "A", "G", "keep"), (2, "G", "A", "swap"), (3, "T", "C", "complement"), (4, "C", "T", "complement_swap"),
             (5, "A", "T", "drop"), (9, "T", "A", "keep"), (10, "A", "T", "swap"), (11, "C", "G", "keep"),
-            (12, "AT", "T", "keep"), (13, "C", "CA", "swap"), (6, "GTT", "A", "indel_unmatched"), (7, "I", "D", "unalignable"),
+            (12, "AT", "T", "keep"), (13, "C", "CA", "swap"), (6, "GTT", "A", "indel_unmatched"),
         ]
         result = alleles.reference_alignment(pd.Series(["1"] * len(cases)), pd.Series([c[0] for c in cases]),
                                              pd.Series([c[1] for c in cases]), pd.Series([c[2] for c in cases]), fasta)
         self.assertEqual(list(result["action"]), [c[3] for c in cases])
+
+    def test_indels_are_left_aligned_and_trimmed(self):
+        genome = Path(tempfile.mkdtemp())
+        write_fasta(genome, {"1": "GCACACATT"})  # a CA repeat at positions 2-7
+        fasta = alleles.Fasta(genome / "GRCh38.fa")
+        data = frame(POS38=[5, 3, 8], EA=["A", "ACAC", "C"], OA=["ACA", "AC", "T"])
+        action = np.array(["keep", "keep", "keep"], dtype=object)
+        normalised, moved = alleles.normalise_indels(data, fasta, action)
+        # deletion of CA written at the right of the repeat moves to the left anchor G at position 1;
+        # an over-long insertion AC>ACAC is trimmed to its shortest left-aligned form; the SNV is untouched
+        self.assertEqual(list(zip(normalised["POS38"].astype(int), normalised["OA"], normalised["EA"])),
+                         [(1, "GCA", "G"), (1, "G", "GCA"), (8, "T", "C")])
+        self.assertEqual(moved, 2)
 
     def test_alignment_reorients_effect_size_and_frequency(self):
         genome = Path(tempfile.mkdtemp())

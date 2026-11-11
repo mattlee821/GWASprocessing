@@ -89,6 +89,47 @@ def write_fasta(genome_dir: Path, sequences: dict[str, str], name: str = "GRCh38
     return path
 
 
+def write_grch38_references(root: Path, variants: list[tuple], populations: tuple[str, ...] = ("EUR", "ALL"),
+                            paired: list[tuple] | None = None) -> Path:
+    """GRCh38 reference arrays as the src/reference_data builders write them.
+
+    variants: (chrom, pos38, rs number, REF, ALT, ALT frequency) -> dbsnp/GRCh38 and 1000genomes/GRCh38 for each
+    population; paired: (chrom, pos37, pos38, REF, ALT) -> build_detection sample."""
+    import numpy as np
+    import gwas_reference as ref
+
+    db = root / "dbsnp" / "GRCh38"
+    db.mkdir(parents=True, exist_ok=True)
+    rows = sorted(variants, key=lambda v: (ref.CHROM_CODE[str(v[0])], v[1]))
+    for chrom in ref.CHROMS:
+        sel = [v for v in rows if str(v[0]) == chrom]
+        np.array([v[1] for v in sel], dtype="<u4").tofile(db / f"chr{chrom}.pos.u32")
+        np.array(ref.allele_hash([v[3] for v in sel], [v[4] for v in sel]) if sel else [], dtype="<u4").tofile(db / f"chr{chrom}.hash.u32")
+        np.array([v[2] for v in sel], dtype="<u4").tofile(db / f"chr{chrom}.rs.u32")
+    by_rs = sorted({(v[2], ref.CHROM_CODE[str(v[0])], v[1]) for v in rows})
+    np.array([r[0] for r in by_rs], dtype="<u4").tofile(db / "rs.u32")
+    np.array([r[1] for r in by_rs], dtype="u1").tofile(db / "rs_chrom.u8")
+    np.array([r[2] for r in by_rs], dtype="<u4").tofile(db / "rs_pos.u32")
+    (db / "meta.json").write_text(json.dumps({"dbsnp_build": "test", "version": 1}), encoding="utf-8")
+    kg = root / "1000genomes" / "GRCh38"
+    kg.mkdir(parents=True, exist_ok=True)
+    snvs = [v for v in rows if len(v[3]) == 1 and len(v[4]) == 1 and 0 < v[5] < 1]
+    for pop in populations:
+        np.array([ref.CHROM_CODE[str(v[0])] * ref.KEY_SCALE + v[1] for v in snvs], dtype="<i8").tofile(kg / f"{pop}.key.i64")
+        np.array([ref.BASES[v[3]] for v in snvs], dtype="u1").tofile(kg / f"{pop}.ref.u1")
+        np.array([ref.BASES[v[4]] for v in snvs], dtype="u1").tofile(kg / f"{pop}.alt.u1")
+        np.array([v[5] for v in snvs], dtype="<f4").tofile(kg / f"{pop}.af.f4")
+    if paired:
+        bd = root / "build_detection"
+        bd.mkdir(parents=True, exist_ok=True)
+        for name, col in (("grch37", 1), ("grch38", 2)):
+            order = sorted(paired, key=lambda v: ref.CHROM_CODE[str(v[0])] * ref.KEY_SCALE + v[col])
+            np.array([ref.CHROM_CODE[str(v[0])] * ref.KEY_SCALE + v[col] for v in order], dtype="<i8").tofile(bd / f"{name}.key.i64")
+            np.array([ref.BASES[v[3]] for v in order], dtype="u1").tofile(bd / f"{name}.ref.u1")
+            np.array([ref.BASES[v[4]] for v in order], dtype="u1").tofile(bd / f"{name}.alt.u1")
+    return root
+
+
 def make_reference(root: Path, lookup_rows: list[tuple] | None = None, population: str = "ALL",
                    offset_chains: bool = True, fasta: dict[str, str] | None = None) -> Path:
     root.mkdir(parents=True, exist_ok=True)

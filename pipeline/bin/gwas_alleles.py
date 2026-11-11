@@ -189,6 +189,30 @@ def annotate_with_reference(frame: pd.DataFrame, lookup: pd.DataFrame) -> pd.Dat
     return out
 
 
+def annotate_with_frequencies(frame: pd.DataFrame, freqs: Any) -> pd.DataFrame:
+    """GRCh38 counterpart of annotate_with_reference: REF_A1 (1000 Genomes ALT), REF_A2 (REF) and REF_AF1 (ALT
+    frequency in freqs.population) for rows matching a record at (CHR, POS38) on either strand. Alleles are in
+    GRCh38 orientation, so LIFT_STRAND is reset to '+' (no GRCh37 re-orientation)."""
+    out = frame.copy()
+    n = len(out)
+    ref_a1 = np.full(n, "", dtype=object)
+    ref_a2 = np.full(n, "", dtype=object)
+    ref_af1 = np.full(n, np.nan)
+    if n:
+        candidates = freqs.annotate(out["CHR"].to_numpy(dtype=object), out["POS38"].to_numpy(dtype="float64"))
+        ea, oa = upper_alleles(out["EA"]).reset_index(drop=True), upper_alleles(out["OA"]).reset_index(drop=True)
+        done = np.zeros(n, dtype=bool)
+        for k in range(3):
+            a1, a2 = candidates[f"A1_{k}"].reset_index(drop=True), candidates[f"A2_{k}"].reset_index(drop=True)
+            match = ~done & alleles_match(ea, oa, a1, a2)
+            ref_a1[match], ref_a2[match] = a1[match].to_numpy(), a2[match].to_numpy()
+            ref_af1[match] = candidates[f"AF1_{k}"].to_numpy()[match]
+            done |= match
+    out["REF_SNP"], out["REF_A1"], out["REF_A2"], out["REF_AF1"] = np.full(n, None, dtype=object), ref_a1, ref_a2, ref_af1
+    out["LIFT_STRAND"] = "+"
+    return out
+
+
 def fill_missing_rsids(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
     out = frame.copy()
     snp = out["SNP"].astype("string").str.strip()
@@ -440,7 +464,8 @@ def reference_alignment(chrom: pd.Series, pos: pd.Series, ea: pd.Series, oa: pd.
 
     Actions: keep, swap (effect allele is the reference base), complement (other allele's complement is the
     reference: reverse-strand report), complement_swap, drop (SNV whose alleles cannot match the reference),
-    indel_unmatched (kept), unalignable (non-ACGT alleles or no reference sequence; kept).
+    indel_unmatched (indel whose alleles do not match the reference sequence; removed, as REF must match the
+    genome), unalignable (no reference sequence at the position; kept).
     """
     chroms = normalize_chromosome_series(pd.Series(chrom).reset_index(drop=True)).astype(str).to_numpy()
     positions = numeric_series(pd.Series(pos).reset_index(drop=True)).to_numpy(dtype="float64")
@@ -485,6 +510,44 @@ def reference_alignment(chrom: pd.Series, pos: pd.Series, ea: pd.Series, oa: pd.
     return pd.DataFrame({"action": action})
 
 
+REMOVED_ACTIONS = ("drop", "indel_unmatched")  # alignment actions that remove the row
+
+
+def normalise_indels(frame: pd.DataFrame, fasta: Fasta, action: np.ndarray) -> tuple[pd.DataFrame, int]:
+    """Left-align and trim indels whose REF (OA) matches the GRCh38 sequence (Tan et al. 2015, as bcftools norm):
+    while the alleles end in the same base, drop it (re-anchoring on the base to the left when an allele empties),
+    then remove shared leading bases while both alleles are longer than 1. Returns the frame and how many moved."""
+    out = frame.copy()
+    ea, oa = upper_alleles(out["EA"]).to_numpy(), upper_alleles(out["OA"]).to_numpy()
+    rows = np.where(np.isin(action, ["keep", "swap"]) & ((pd.Series(ea).str.len() > 1) | (pd.Series(oa).str.len() > 1)).to_numpy())[0]
+    if not len(rows):
+        return out, 0
+    chroms = normalize_chromosome_series(out["CHR"]).astype(str).to_numpy()
+    positions = numeric_series(out["POS38"]).to_numpy(dtype="float64")
+    moved = 0
+    new_pos, new_ea, new_oa = positions.copy(), ea.copy(), oa.copy()
+    for i in rows:
+        chrom, pos, ref, alt = chroms[i], int(positions[i]), oa[i], ea[i]
+        start = (pos, ref, alt)
+        for _ in range(1000):
+            if ref and alt and ref[-1] == alt[-1]:
+                ref, alt = ref[:-1], alt[:-1]
+            elif not ref or not alt:
+                base = fasta.bases(chrom, [pos - 1])[0] if pos > 1 else ""
+                if not base:
+                    break
+                ref, alt, pos = base + ref, base + alt, pos - 1
+            else:
+                break
+        while len(ref) > 1 and len(alt) > 1 and ref[0] == alt[0]:
+            ref, alt, pos = ref[1:], alt[1:], pos + 1
+        if ref and alt and (pos, ref, alt) != start:
+            new_pos[i], new_oa[i], new_ea[i] = pos, ref, alt
+            moved += 1
+    out["POS38"], out["EA"], out["OA"] = new_pos, new_ea, new_oa
+    return out, moved
+
+
 def alignment_summary(action: np.ndarray, fasta: Fasta) -> dict[str, Any]:
     counts = {str(k): int(v) for k, v in zip(*np.unique(action, return_counts=True))} if len(action) else {}
     return alignment_summary_from_counts(counts, fasta)
@@ -495,7 +558,7 @@ def alignment_summary_from_counts(counts: dict[str, int], fasta: Fasta) -> dict[
         "performed": True, "fasta": str(fasta.path), "kept": counts.get("keep", 0),
         "swapped": counts.get("swap", 0) + counts.get("complement_swap", 0),
         "strand_flipped": counts.get("complement", 0) + counts.get("complement_swap", 0),
-        "dropped_mismatch": counts.get("drop", 0), "indels_unmatched_kept": counts.get("indel_unmatched", 0),
+        "dropped_mismatch": counts.get("drop", 0), "indels_unmatched_dropped": counts.get("indel_unmatched", 0),
         "unalignable_kept": counts.get("unalignable", 0),
     }
 
@@ -503,7 +566,7 @@ def alignment_summary_from_counts(counts: dict[str, int], fasta: Fasta) -> dict[
 def align_table_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Orient each variant so OA (written as REF) is the GRCh38 base; flip BETA and EAF when alleles swap."""
     out, action = orient_to_reference(frame, fasta)
-    return out[action != "drop"], alignment_summary(action, fasta)
+    return out[~np.isin(action, REMOVED_ACTIONS)], alignment_summary(action, fasta)
 
 
 def orient_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame, np.ndarray]:

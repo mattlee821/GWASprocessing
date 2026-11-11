@@ -220,6 +220,23 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertTrue(third.record["reused_existing_outputs"])
         self.assertEqual(third.qc["completed_at"], second.qc["completed_at"])
 
+    def test_unusable_raw_gwas_catalog_file_falls_back_to_the_harmonised_file(self):
+        from testlib import LocalHttpServer
+        served = self.tmp / "served"
+        served.mkdir()
+        rows = [[1, 1100 + i, f"rs{i}", "A", "G", 0.3, 0.1, 0.02, 1e-6] for i in range(3)]
+        write_table(served / "x.h.tsv", ["chromosome", "base_pair_location", "rsid", "effect_allele", "other_allele",
+                                         "effect_allele_frequency", "beta", "standard_error", "p_value"], rows)
+        raw = write_table(self.tmp / "raw.tsv", ["SNP", "A1", "A2", "P"], [["rs1", "A", "G", 0.1]])
+        with LocalHttpServer(served) as server:
+            metadata = {"source_type": "gwas_catalog", "file_kind": "raw", "harmonised_url": f"{server.url}/x.h.tsv",
+                        "genome_assembly": "GRCh38"}
+            result = run_standardise(self.tmp, raw, EXAMPLES / "reference", metadata=metadata)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.qc["gwas_catalog_fallback"]["harmonised_file"], "x.h.tsv")
+        self.assertEqual(len(result.rows), 3)
+        self.assertIn("harmonised file x.h.tsv was used", result.stderr)
+
     def test_odds_ratios_and_their_confidence_interval_are_converted(self):
         raw = write_table(self.tmp / "gwas.tsv", ["CHR", "POS", "SNP", "EA", "OA", "EAF", "OR", "L95", "U95", "P", "N"],
                           [[1, 7000, "rs70", "A", "G", 0.3, 1.2, 1.1, 1.3091, 1e-4, 5000]])

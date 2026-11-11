@@ -59,26 +59,46 @@ def list_absolute(url: str) -> list[str]:
     return links
 
 
-def choose_summary_file(study_url: str, accession: str, pmid: str = "") -> str:
-    top_links = list_absolute(study_url)
-    harmonised = [u for u in top_links if u.rstrip("/").endswith("/harmonised")]
-    candidates: list[str] = []
-    search_dirs = harmonised or [study_url]
-    for directory in search_dirs:
-        for link in list_absolute(directory):
-            name = Path(urllib.parse.urlparse(link).path).name
-            if not name.endswith((".h.tsv.gz", ".tsv.gz", ".txt.gz", ".tbl.gz")):
-                continue
-            candidates.append(link)
-    if not candidates:
-        raise FileNotFoundError(f"No summary statistics file found in {study_url}")
+SUMMARY_SUFFIXES = (".tsv.gz", ".txt.gz", ".tbl.gz", ".csv.gz", ".tsv", ".txt", ".csv", ".tbl", ".gz")
+
+
+def _summary_files(directory: str) -> list[str]:
+    files = []
+    for link in list_absolute(directory):
+        name = Path(urllib.parse.urlparse(link).path).name
+        lower = name.lower()
+        if link.endswith("/") or lower.endswith(("-meta.yaml", ".md5", ".md5sum", ".yaml", ".yml", ".tbi")) or lower.startswith(("readme", "md5")):
+            continue
+        if lower.endswith(SUMMARY_SUFFIXES):
+            files.append(link)
+    return files
+
+
+def _pick(candidates: list[str], accession: str, pmid: str) -> str:
     if pmid:
-        pmid_matches = [u for u in candidates if Path(urllib.parse.urlparse(u).path).name.startswith(f"{pmid}-{accession}")]
-        if pmid_matches:
-            pmid_harmonised = [u for u in pmid_matches if Path(urllib.parse.urlparse(u).path).name.endswith(".h.tsv.gz")]
-            return sorted(pmid_harmonised or pmid_matches)[0]
-    harmonised_matches = [u for u in candidates if ".h.tsv.gz" in Path(urllib.parse.urlparse(u).path).name]
-    return sorted(harmonised_matches or candidates)[0]
+        named = [u for u in candidates if Path(urllib.parse.urlparse(u).path).name.startswith(f"{pmid}-{accession}")]
+        if named:
+            return sorted(named)[0]
+    return sorted(candidates)[0] if candidates else ""
+
+
+def choose_summary_files(study_url: str, accession: str, pmid: str = "") -> tuple[str, str]:
+    """(raw, harmonised) file URLs for a study; either may be '' when the Catalog has none.
+
+    Raw is the author-submitted file in the study folder; harmonised is the *.h.tsv.gz in harmonised/."""
+    top = list_absolute(study_url)
+    harmonised_dirs = [u for u in top if u.rstrip("/").endswith("/harmonised")]
+    raw = [u for u in _summary_files(study_url) if ".h.tsv" not in u]
+    harmonised = [u for d in harmonised_dirs for u in _summary_files(d) if ".h.tsv" in u]
+    return _pick(raw, accession, pmid), _pick(harmonised, accession, pmid)
+
+
+def choose_summary_file(study_url: str, accession: str, pmid: str = "", prefer: str = "raw") -> str:
+    raw, harmonised = choose_summary_files(study_url, accession, pmid)
+    chosen = (harmonised or raw) if prefer == "harmonised" else (raw or harmonised)
+    if not chosen:
+        raise FileNotFoundError(f"No summary statistics file found in {study_url}")
+    return chosen
 
 
 def download_sidecars(study_url: str, out_dir: Path) -> list[str]:
@@ -139,11 +159,15 @@ def verify_gzip(path: Path) -> dict[str, str | bool]:
     return {"checked": True, "ok": True}
 
 
-def download_gwas_catalog(location: str, out_dir: str | Path, pmid: str = "") -> dict:
+def download_gwas_catalog(location: str, out_dir: str | Path, pmid: str = "", prefer: str = "raw") -> dict:
+    """Download a study's summary statistics: the raw author-submitted file by default (prefer='raw'), or the
+    Catalog's harmonised file (prefer='harmonised'). The other file's URL is recorded so a failed raw file can
+    fall back to the harmonised one."""
     out_dir = ensure_dir(out_dir)
     accession = accession_from_location(location)
     study_url = f"{ftp_root()}/{accession_range(accession)}/{accession}/"
-    summary_url = choose_summary_file(study_url, accession, pmid)
+    raw_url, harmonised_url = choose_summary_files(study_url, accession, pmid)
+    summary_url = choose_summary_file(study_url, accession, pmid, prefer)
     summary = download_url(summary_url, out_dir)
     sidecar_metadata = harmonised_metadata(summary_url, out_dir)
     sidecars = download_sidecars(study_url, out_dir)
@@ -168,6 +192,9 @@ def download_gwas_catalog(location: str, out_dir: str | Path, pmid: str = "") ->
         "accession": accession,
         "study_url": study_url,
         "summary_url": summary_url,
+        "file_kind": "harmonised" if summary_url == harmonised_url else "raw",
+        "raw_url": raw_url,
+        "harmonised_url": harmonised_url,
         "raw_path": str(summary),
         "sidecars": sidecars,
         "md5": md5_result,
@@ -183,9 +210,10 @@ def main() -> None:
     parser.add_argument("--gwas-location", required=True)
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--pmid", default="")
+    parser.add_argument("--prefer", default="raw", choices=["raw", "harmonised"])
     parser.add_argument("--metadata", required=True)
     args = parser.parse_args()
-    write_json(args.metadata, download_gwas_catalog(args.gwas_location, args.out_dir, args.pmid))
+    write_json(args.metadata, download_gwas_catalog(args.gwas_location, args.out_dir, args.pmid, args.prefer))
 
 
 if __name__ == "__main__":

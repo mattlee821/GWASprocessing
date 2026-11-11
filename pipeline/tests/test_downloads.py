@@ -143,6 +143,23 @@ class GwasCatalogTests(unittest.TestCase):
         self.assertEqual(Path(meta["raw_path"]).read_bytes(), payload)
         self.assertEqual((meta["md5"]["ok"], meta["genome_assembly"]), (True, "GRCh38"))
 
+    def test_raw_file_is_preferred_and_the_harmonised_url_recorded(self):
+        root, _ = self.serve_catalog()
+        study = root / "GCST008001-GCST009000" / "GCST008996"
+        raw_payload = gzip.compress(b"SNP\tA1\tA2\nrs1\tA\tG\n")
+        (study / "30239722-GCST008996-EFO_0004343.tsv.gz").write_bytes(raw_payload)
+        with LocalHttpServer(root) as server:
+            os.environ["GWAS_CATALOG_FTP_ROOT"] = server.url
+            try:
+                raw = download_gwas_catalog.download_gwas_catalog("GCST008996", self.tmp / "raw", "30239722")
+                harmonised = download_gwas_catalog.download_gwas_catalog("GCST008996", self.tmp / "hm", "30239722", "harmonised")
+            finally:
+                del os.environ["GWAS_CATALOG_FTP_ROOT"]
+        self.assertEqual((raw["file_kind"], Path(raw["raw_path"]).read_bytes()), ("raw", raw_payload))
+        self.assertTrue(raw["harmonised_url"].endswith(".h.tsv.gz"))
+        self.assertEqual(harmonised["file_kind"], "harmonised")
+        self.assertTrue(harmonised["raw_url"].endswith("EFO_0004343.tsv.gz"))
+
     def test_checksum_mismatch_is_an_error(self):
         root, _ = self.serve_catalog(md5_text="0" * 32 + "  30239722-GCST008996-EFO_0004343.h.tsv.gz\n")
         with LocalHttpServer(root) as server:

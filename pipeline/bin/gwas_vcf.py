@@ -55,7 +55,8 @@ FORMAT_DEFINITIONS = {
 BASE_FORMAT = ("ES", "SE", "LP", "AF", "AFS")
 OPTIONAL_FORMAT = {"N": "SS", "NCASE": "NC", "EZ": "EZ", "IMPINFO": "SI"}
 HM_DESCRIPTION = ("Harmonisation action. Non-palindromic: forward (as reported), swapped (effect allele was the reference "
-                  "base; ES negated and AF to 1-AF), complemented (reported on the reverse strand), complemented_swapped. "
+                  "base; ES negated and AF to 1-AF), complemented (reported on the reverse strand), complemented_swapped, "
+                  "unverified (no reference sequence at the position). "
                   "Palindromic (A/T or C/G): palindrome_forward or palindrome_complemented (strand inferred from study vs "
                   "1000 Genomes frequency with tolerance 0.08), or palindrome_ambiguous (strand could not be inferred; kept "
                   "as reported); each with _swapped when the alleles were then swapped")
@@ -69,8 +70,8 @@ SAMPLE_KEYS = {
     "VariantsNotRead": ("Integer", "Number of variants that could not be read: no GRCh38 position, or missing or invalid "
                         "alleles, effect size, standard error or P value"),
     "HarmonisedVariants": ("Integer", "Total number of harmonised variants (written to this file)"),
-    "VariantsNotHarmonised": ("Integer", "Total number of variants that could not be harmonised: alleles matching neither "
-                              "strand of the GRCh38 reference, or duplicates of an earlier record"),
+    "VariantsNotHarmonised": ("Integer", "Total number of variants that could not be harmonised: SNV alleles matching neither "
+                              "strand of the GRCh38 reference, indel alleles not matching its sequence, or duplicates of an earlier record"),
     "SwitchedAlleles": ("Integer", "Total number of variants whose effect and other alleles were swapped to match the reference"),
     "AFFilled": ("Integer", "Number of variants whose AF is the 1000 Genomes frequency because the study reported none"),
     "TotalControls": ("Float", "Total number of controls in the association study (total sample size for a continuous trait)"),
