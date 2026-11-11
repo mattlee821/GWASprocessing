@@ -44,6 +44,13 @@ class AdaptedPassthroughTests(unittest.TestCase):
         self.assertEqual(row["POS"], 1100)
         self.assertEqual((result.qc["build_detection"]["build"], result.qc["build_detection"]["method"]), ("hg19", "declared"))
 
+    def test_opengwas_lp_999_sentinel_is_recovered_from_the_z_score(self):
+        raw = write_vcf(self.tmp / "p0.gwas.vcf", [("1", 1000, "rs1", "G", "A", "0.5:0.01:999:0.3:1000")])
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", input_build="hg19")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertAlmostEqual(float(result.rows[0]["FORMAT"]["LP"]), 544.2, delta=1.0)  # z = 50
+        self.assertEqual(result.qc["p_value_source"]["from_z"], 1)
+
     def test_passthrough_hg19_lifted_to_grch38(self):
         reference = self.tmp / "reference"
         write_chain(reference / "genome" / "hg19ToHg38.over.chain.gz",

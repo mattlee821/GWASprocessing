@@ -1346,7 +1346,11 @@ def vcf_records_to_table(chunk: pd.DataFrame, sample_column: int) -> pd.DataFram
         exploded = out[multi].explode(split)
         out = pd.concat([out[~multi].assign(**{c: out.loc[~multi, c].str[0] for c in split}), exploded])
         out = out.sort_index(kind="stable").reset_index(drop=True)
-    return out.replace({".": "", "NA": ""})
+    out = out.replace({".": "", "NA": ""})
+    # OpenGWAS writes LP = 999 for P = 0 (pygwasvcf reads it back as P = 0); treat it as missing so LP is recovered
+    # from ES/SE like a P of 0 in a table
+    out.loc[pd.to_numeric(out["LOG10P"], errors="coerce") == 999, "LOG10P"] = ""
+    return out
 
 
 def read_vcf_pieces(raw_path: Path, chunk_rows: int | None, config: dict[str, Any]):

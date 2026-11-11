@@ -73,7 +73,12 @@ RSID_ALIASES = ["SNP", "rsid", "rsids", "hm_rsid", "rsids_y", "ID", "MarkerName"
 SNPID_ALIASES = ["SNPID", "source_snp_id", "Name", "ID", "MarkerName", "variant_id"]
 EA_ALIASES = ["EA", "effect_allele", "hm_effect_allele", "effectAllele", "effectAllele_y", "ALLELE1", "A1", "Tested_Allele", "Allele1", "ALT"]
 OA_ALIASES = ["OA", "other_allele", "hm_other_allele", "otherAllele", "otherAllele_y", "ALLELE0", "A2", "Other_Allele", "Allele2", "REF"]
-EAF_ALIASES = ["EAF", "effectAlleleFreq", "effect_allele_frequency", "hm_effect_allele_frequency", "eaf_ref", "Freq_Tested_Allele", "A1FREQ", "A1_FREQ", "Freq1", "Freq1.Hapmap", "freq", "AF"]
+# Effect-allele frequency names (never MAF, which is not tied to the effect allele); allele-tagged forms as in
+# MungeSumstats' dictionary (FREQ1, A1FREQ, FRQ_A1, ...). Freq_Tested_Allele_in_HRS: Yengo et al. 2018.
+EAF_ALIASES = ["EAF", "effectAlleleFreq", "effect_allele_frequency", "hm_effect_allele_frequency", "eaf_ref", "Freq_Tested_Allele",
+               "Freq_Tested_Allele_in_HRS", "A1FREQ", "A1_FREQ", "Freq1", "Freq1.Hapmap", "freq", "AF", "FRQ", "FRQ_A1", "FREQ_A1",
+               "A1_AF", "AF1", "AF_Allele2", "A2FREQ", "EFFECT_ALLELE_FREQ", "Freq_Effect_Allele", "effect_allele_freq", "ALT_FREQS",
+               "EAF_HRC", "EAF_UKB"]
 BETA_ALIASES = ["BETA", "Beta", "Effect", "ES", "beta", "hm_beta", "b", "effect"]
 SE_ALIASES = ["SE", "StdErr", "standard_error", "se"]
 P_ALIASES = ["P", "Pvalue", "Pval", "pval", "p_value", "P-value", "P.value", "p-value", "p.value", "p"]

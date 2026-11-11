@@ -237,6 +237,14 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(len(result.rows), 3)
         self.assertIn("harmonised file x.h.tsv was used", result.stderr)
 
+    def test_yengo_style_frequency_column_is_read_as_the_study_eaf(self):
+        raw = write_table(self.tmp / "yengo.tsv", ["CHR", "POS", "SNP", "Tested_Allele", "Other_Allele", "Freq_Tested_Allele_in_HRS",
+                                                   "BETA", "SE", "P", "N"], [[1, 1000, "rs1", "A", "G", 0.31, 0.1, 0.02, 1e-6, 5000]])
+        result = run_standardise(self.tmp, raw, self.reference([]), input_build="hg19")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.qc["source_columns"]["EAF"], "Freq_Tested_Allele_in_HRS")
+        self.assertEqual(result.rows[0]["FORMAT"]["AFS"], "study")
+
     def test_odds_ratios_and_their_confidence_interval_are_converted(self):
         raw = write_table(self.tmp / "gwas.tsv", ["CHR", "POS", "SNP", "EA", "OA", "EAF", "OR", "L95", "U95", "P", "N"],
                           [[1, 7000, "rs70", "A", "G", 0.3, 1.2, 1.1, 1.3091, 1e-4, 5000]])
