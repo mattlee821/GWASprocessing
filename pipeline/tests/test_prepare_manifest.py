@@ -88,6 +88,7 @@ class PrepareManifestTests(unittest.TestCase):
 
     def test_manifest_optional_fields_are_preserved_and_hashed(self):
         header = "GWAS_location\tphenotype\tancestry\tsex\tauthor\tyear\tPMID\tsource_type\tinput_build\tpopulation\tdelimiter\tformat\tstudy_yaml\n"
+        (self.config_root / "custom.yaml").write_text("description: custom\n", encoding="utf-8")
         manifest = self.manifest(f"{self.raw}\tBMI\tall\tfemale\tLocke\t2015\t25673413\tlocal\thg19\tALL\t\\s+\ttable\tcustom.yaml\n", header)
         self.prepare(manifest)
         row = self.rows()[0]

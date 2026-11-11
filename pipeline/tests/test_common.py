@@ -199,3 +199,16 @@ class ManifestReadingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StudyYamlResolutionTests(unittest.TestCase):
+    def test_named_study_yaml_resolves_from_the_repository_root_and_must_exist(self):
+        import tempfile
+        repo = Path(tempfile.mkdtemp())
+        (repo / "manifests").mkdir()
+        (repo / "manifests" / "x.yaml").write_text("study_type: casecontrol\n", encoding="utf-8")
+        config = common.resolve_study_config(repo / "manifests", "s", None, "manifests/x.yaml")
+        self.assertEqual(config["study_type"], "casecontrol")
+        with self.assertRaises(SystemExit) as caught:
+            common.resolve_study_config(repo / "manifests", "s", None, "manifests/missing.yaml")
+        self.assertEqual(caught.exception.code, 78)

@@ -355,6 +355,9 @@ def resolve_config_yaml_path(config_root: str | Path, path_value: str) -> Path:
     root_candidate = root / path
     if root_candidate.exists():
         return root_candidate
+    repo_candidate = root.parent / path  # paths written relative to the repository root, e.g. manifests/x.yaml
+    if repo_candidate.exists():
+        return repo_candidate
     cwd_candidate = Path.cwd() / path
     if cwd_candidate.exists():
         return cwd_candidate
@@ -367,10 +370,13 @@ def resolve_study_config(
     explicit_yaml: str | None = None,
     manifest_yaml: str | None = None,
 ) -> dict[str, Any]:
-    if explicit_yaml:
-        return load_yaml(resolve_config_yaml_path(config_root, explicit_yaml))
-    if manifest_yaml:
-        return load_yaml(resolve_config_yaml_path(config_root, manifest_yaml))
+    for named in (explicit_yaml, manifest_yaml):
+        if named:  # a study YAML that is named must exist: silently ignoring it would drop its settings
+            path = resolve_config_yaml_path(config_root, named)
+            if not path.exists():
+                raise config_error(f"Study YAML {named} for {study_id} not found (looked in {config_root}, its parent and the "
+                                   "working directory)")
+            return load_yaml(path)
     candidate = Path(config_root) / f"{study_id}.yaml"
     return load_yaml(candidate)
 
