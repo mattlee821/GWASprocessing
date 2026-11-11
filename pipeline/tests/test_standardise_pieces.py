@@ -161,7 +161,7 @@ class StepLogTests(unittest.TestCase):
         self.assertEqual(causes["no_position_or_rsid"]["study_maf_below_threshold"], 1)
         self.assertEqual(causes["liftover_to_grch38_failed"]["rows"], 1)
         self.assertEqual(sum(c["rows"] for c in causes.values()), result.qc["rows_removed_missing_required"])
-        self.assertIn("GRCh38 coordinates", result.stderr)  # the summary is printed for the Nextflow task log
+        self.assertIn("Alleles and GRCh38 coordinates", result.stderr)  # the summary is printed for the Nextflow task log
         self.assertIn(f"Written: {result.qc['output_rows']:,} of {result.qc['input_rows']:,} input rows", result.stderr)
         self.assertNotIn("UNRECONCILED", result.stderr)
 
@@ -187,7 +187,7 @@ class StepLogTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         assert_reconciles(self, result.qc)
         self.assertEqual(result.qc["input_rows"], 6)
-        coordinates = next(s for s in result.qc["steps"] if s["title"] == "GRCh38 coordinates")
+        coordinates = next(s for s in result.qc["steps"] if s["title"] == "Alleles and GRCh38 coordinates")
         self.assertEqual(coordinates["removed"], 3)  # GL contig, and positions outside the chain on chromosomes 1 and 2
         duplicates = next(s for s in result.qc["steps"] if s["title"] == "Duplicates")
         self.assertEqual(duplicates["removed"], 1)

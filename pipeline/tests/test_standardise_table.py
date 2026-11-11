@@ -237,6 +237,15 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(len(result.rows), 3)
         self.assertIn("harmonised file x.h.tsv was used", result.stderr)
 
+    def test_id_coded_indels_with_grch37_positions_count_as_invalid_alleles_not_liftover_failures(self):
+        raw = write_table(self.tmp / "id.tsv", HEADER, [[1, 1000 + i, f"rs{i}", "A", "G", 0.3, 0.1, 0.02, 1e-6, 5000] for i in range(3)]
+                          + [[1, 2000, "chr1:2000:D", "D", "I", 0.3, 0.1, 0.02, 1e-6, 5000]])
+        result = run_standardise(self.tmp, raw, self.reference([]), input_build="hg19")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        causes = result.qc["incomplete_by_cause"]
+        self.assertEqual(causes["invalid_allele"]["rows"], 1)
+        self.assertNotIn("liftover_to_grch38_failed", causes)
+
     def test_yengo_style_frequency_column_is_read_as_the_study_eaf(self):
         raw = write_table(self.tmp / "yengo.tsv", ["CHR", "POS", "SNP", "Tested_Allele", "Other_Allele", "Freq_Tested_Allele_in_HRS",
                                                    "BETA", "SE", "P", "N"], [[1, 1000, "rs1", "A", "G", 0.31, 0.1, 0.02, 1e-6, 5000]])

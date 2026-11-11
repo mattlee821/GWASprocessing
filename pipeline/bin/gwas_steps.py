@@ -22,9 +22,9 @@ CAUSE_TEXT = {
     "missing_or_invalid_se": "standard error missing, zero or negative and not derivable",
     "missing_or_invalid_p": "P value missing or invalid and not derivable",
 }
-COORDINATE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "liftover_to_grch38_failed",
-                     "chromosome_not_primary", "invalid_position")
-STATISTIC_CAUSES = ("missing_allele", "invalid_allele", "missing_beta", "missing_or_invalid_se", "missing_or_invalid_p")
+COORDINATE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "missing_allele", "invalid_allele",
+                     "liftover_to_grch38_failed", "chromosome_not_primary", "invalid_position")
+STATISTIC_CAUSES = ("missing_beta", "missing_or_invalid_se", "missing_or_invalid_p")
 LIFTOVER_TEXT = {
     "unmapped": "position absent from the chain file",
     "other_chrom": "maps to a different chromosome",
@@ -101,9 +101,9 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
     build = qc.get("build_detection", {}) or {}
     if build.get("build"):
         notes.append(f"input build: {build.get('build')} ({build.get('method', '')})")
-    rows = _step(steps, rows, "GRCh38 coordinates",
-                 "Every variant needs a GRCh38 chromosome and position: taken from the file, parsed from chr:pos identifiers, "
-                 "or looked up by rsID, then lifted from GRCh37 where needed.",
+    rows = _step(steps, rows, "Alleles and GRCh38 coordinates",
+                 "Every variant needs 2 different alleles made of A, C, G and T, and a GRCh38 chromosome and position: taken "
+                 "from the file, parsed from chr:pos identifiers, or looked up by rsID, then lifted from GRCh37 where needed.",
                  {CAUSE_TEXT[c]: _n((causes.get(c) or {}).get("rows")) for c in COORDINATE_CAUSES},
                  {"positions parsed from chr:pos identifiers": _n(qc.get("positions_from_variant_ids")),
                   "GRCh37 position looked up by rsID (1000 Genomes)": _n(fills.get("POS19")),
@@ -111,9 +111,8 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                   f"lifted from GRCh37 to GRCh38{' (BCFtools/liftover)' if lift.get('tool') else ''}": _n(lift.get("ok")),
                   "alleles complemented after a minus-strand liftover": _n(lift.get("minus_strand")),
                   "alleles swapped between builds (reference allele changed)": _n(lift.get("swapped_between_builds"))}, notes)
-    rows = _step(steps, rows, "Alleles and statistics",
-                 "Every variant needs 2 different alleles made of A, C, G and T, an effect size, a positive standard error "
-                 "and a P value.",
+    rows = _step(steps, rows, "Statistics",
+                 "Every variant needs an effect size, a positive standard error and a P value.",
                  {CAUSE_TEXT[c]: _n((causes.get(c) or {}).get("rows")) for c in STATISTIC_CAUSES}, None,
                  [f"{CAUSE_TEXT[c]}: {_rare_note(causes[c])}" for c in STATISTIC_CAUSES if c in causes])
     rows = _step(steps, rows, "1000 Genomes annotation",

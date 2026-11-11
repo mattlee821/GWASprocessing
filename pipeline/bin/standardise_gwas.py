@@ -568,7 +568,8 @@ def lift_with_bcftools(out: pd.DataFrame, rows: pd.Index, reference_root: str, r
     alt = np.select([action == "keep", action == "swap", action == "complement", action == "complement_swap"], [ea, oa, cea, coa], "")
     ea_is_alt = np.isin(action, ["keep", "complement"])
     usable = ref != ""
-    report["grch37_allele_mismatch"] = int((~usable).sum())
+    valid = pd.Series(ea).str.fullmatch(r"[ACGT]+").fillna(False).to_numpy(bool) & pd.Series(oa).str.fullmatch(r"[ACGT]+").fillna(False).to_numpy(bool) & (ea != oa)
+    report["grch37_allele_mismatch"] = int((~usable & valid).sum())  # rows with invalid alleles are counted as such instead
     out.loc[rows, "POS38"] = np.nan
     work = make_work_dir()
     try:
@@ -671,9 +672,9 @@ def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, A
 # Why a row without its required fields was dropped: the first cause that applies, in this order, so the causes
 # add up to the rows removed. Coordinate causes come first because a row without a position cannot be used whatever
 # its statistics.
-INCOMPLETE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "liftover_to_grch38_failed", "chromosome_not_primary",
-                     "invalid_position", "missing_allele", "invalid_allele", "missing_beta", "missing_or_invalid_se",
-                     "missing_or_invalid_p")
+INCOMPLETE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "missing_allele", "invalid_allele",
+                     "liftover_to_grch38_failed", "chromosome_not_primary", "invalid_position", "missing_beta",
+                     "missing_or_invalid_se", "missing_or_invalid_p")
 
 
 def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.ndarray:
@@ -684,11 +685,11 @@ def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.nd
     conditions = [
         no_position & rsid,
         no_position & ~rsid,
+        ~checks["EA"] | ~checks["OA"],
+        ~checks["ALLELES"],  # before liftover: I/D codes or '-' cannot be lifted, and that is not a liftover failure
         pos19 & ~pos38,
         ~checks["CHR"],
         ~checks["POS38"],
-        ~checks["EA"] | ~checks["OA"],
-        ~checks["ALLELES"],
         ~checks["BETA"],
         ~checks["SE"],
         ~checks["LP"],
