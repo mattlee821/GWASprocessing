@@ -6,7 +6,7 @@ Usage:
     prepare_manifest.py --manifest manifests/main.tsv --work-root GWAS --state-file GWAS/.standardise_state.tsv \
         --output run_manifest.tsv --summary run_manifest_summary.json --rows-dir rows \
         [--config-root manifests] [--reference-root references] [--study-yaml extra.yaml] \
-        [--only-study STUDYID] [--force false] [--qcplot true] [--row-limit 0] [--repo-root .]
+        [--only-study STUDYID] [--force false] [--report true] [--row-limit 0] [--repo-root .]
 
 Exits 78 (configuration error) when any row is invalid, before anything is downloaded.
 """
@@ -89,12 +89,12 @@ def main() -> None:
     parser.add_argument("--study-yaml", default="")
     parser.add_argument("--only-study", default="")
     parser.add_argument("--force", default="false")
-    parser.add_argument("--qcplot", default="true")
+    parser.add_argument("--report", default="true")
     parser.add_argument("--row-limit", type=int, default=0)
     args = parser.parse_args()
 
     manifest = Path(args.manifest)
-    force, qcplot = parse_bool(args.force), parse_bool(args.qcplot)
+    force, report = parse_bool(args.force), parse_bool(args.report)
     work_root, repo_root = Path(args.work_root), Path(args.repo_root)
     config_root = Path(args.config_root) if args.config_root else manifest.parent
     reference_root = Path(args.reference_root) if args.reference_root else repo_root / "references"
@@ -139,11 +139,11 @@ def main() -> None:
             "standard_index": str(output_prefix.with_suffix(".gwas.vcf.gz")) + ".tbi",
             "metadata_json": str(output_prefix.with_suffix(".metadata.json")),
             "qc_json": str(output_prefix.with_suffix(".qc.json")),
-            "plot_tiff": str(output_prefix.with_suffix(".tiff")),
+            "report_html": str(output_prefix.with_suffix(".report.html")),
             "settings_hash": out_row["settings_hash"],
         }
         previous = state.get(out_row["row_hash"])
-        if not force and previous and all(previous.get(k, "") == v for k, v in expected.items()) and state_row_complete(previous, qcplot):
+        if not force and previous and all(previous.get(k, "") == v for k, v in expected.items()) and state_row_complete(previous, report):
             skipped += 1
             continue
         eligible.append(out_row)
@@ -170,7 +170,7 @@ def main() -> None:
     write_json(args.summary, {
         "manifest": str(manifest.resolve()), "state_file": str(Path(args.state_file).resolve()),
         "rows_to_run": len(to_run), "rows_eligible": len(eligible), "rows_deferred_due_to_limit": len(eligible) - len(to_run),
-        "rows_skipped_complete": skipped, "rows_filtered": filtered, "force": force, "qcplot": qcplot,
+        "rows_skipped_complete": skipped, "rows_filtered": filtered, "force": force, "report": report,
         "row_limit": row_limit,
     })
 

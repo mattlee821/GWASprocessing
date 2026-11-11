@@ -154,14 +154,14 @@ class ConfigAndStateTests(unittest.TestCase):
 
     def test_state_row_complete_requires_every_file_to_exist_and_be_non_empty(self):
         tmp = Path(tempfile.mkdtemp())
-        paths = {key: tmp / f"{key}.out" for key in ["standard_vcf", "standard_index", "metadata_json", "qc_json", "plot_tiff"]}
+        paths = {key: tmp / f"{key}.out" for key in ["standard_vcf", "standard_index", "metadata_json", "qc_json", "report_html"]}
         for path in paths.values():
             path.write_text("x", encoding="utf-8")
         row = {key: str(path) for key, path in paths.items()}
-        self.assertTrue(common.state_row_complete(row, qcplot=True))
-        paths["plot_tiff"].write_text("", encoding="utf-8")
-        self.assertFalse(common.state_row_complete(row, qcplot=True))
-        self.assertTrue(common.state_row_complete(row, qcplot=False))
+        self.assertTrue(common.state_row_complete(row, report=True))
+        paths["report_html"].write_text("", encoding="utf-8")
+        self.assertFalse(common.state_row_complete(row, report=True))
+        self.assertTrue(common.state_row_complete(row, report=False))
 
 
 class ReferenceIdentityTests(unittest.TestCase):

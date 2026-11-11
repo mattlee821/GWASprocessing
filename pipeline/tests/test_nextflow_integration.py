@@ -59,7 +59,7 @@ class NextflowIntegrationTests(unittest.TestCase):
         (row,) = self.state().values()
         self.assertEqual(row["study_id"], "locke_2015_1")
         vcf = Path(row["standard_vcf"])
-        for key in ("standard_vcf", "standard_index", "metadata_json", "qc_json", "plot_tiff"):
+        for key in ("standard_vcf", "standard_index", "metadata_json", "qc_json", "report_html"):
             self.assertTrue(Path(row[key]).stat().st_size > 0, key)
         self.assertIn('Phenotype="BMI \\"adjusted\\" $HOME"', read_vcf_text(vcf))
         first_hash = row["settings_hash"]

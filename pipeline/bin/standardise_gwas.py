@@ -921,7 +921,7 @@ def harmonisation_action(pal: np.ndarray, action: np.ndarray) -> np.ndarray:
 def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.ndarray, high: np.ndarray,
                       action: np.ndarray, extras: list[str], keys: list[str], afs_label: str) -> None:
     """One line per row: chromosome rank, POS38, input row, dedup allele pair, alignment action, LP, AF-filled flag,
-    VCF record.
+    AF-missing flag, ES, SS, VCF record.
 
     The leading fields let `sort` restore genome order with input order as the tie-break; LP is kept at full
     precision for lambda GC. Rows that alignment will drop are kept so they still claim their dedup key."""
@@ -934,11 +934,15 @@ def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.n
             rank = gwas_vcf.chrom_ranks(piece["CHR"]).astype(str).astype(object)
             pos = piece["POS38"].to_numpy(dtype="float64").astype("int64").astype(str).astype(object)
             lp = np.char.mod("%.17g", piece["LP"].to_numpy(dtype="float64")).astype(object)
-            filled = ((piece["EAF_SOURCE"].astype(str).to_numpy() == "reference")
-                      & np.isfinite(piece["EAF"].to_numpy(dtype="float64"))).astype(int).astype(str).astype(object)
+            eaf = piece["EAF"].to_numpy(dtype="float64")
+            filled = ((piece["EAF_SOURCE"].astype(str).to_numpy() == "reference") & np.isfinite(eaf)).astype(int).astype(str).astype(object)
+            no_af = (~np.isfinite(eaf)).astype(int).astype(str).astype(object)
+            es = np.char.mod("%.17g", piece["BETA"].to_numpy(dtype="float64")).astype(object)
+            ss = np.char.mod("%.17g", numeric_series(piece["N"]).to_numpy(dtype="float64") if "N" in piece.columns
+                             else np.full(len(piece), np.nan)).astype(object)
             keys_ = (rank + "\t" + pos + "\t" + rows[sl].astype(str).astype(object) + "\t" + low[sl].astype(object)
                      + "\t" + high[sl].astype(object) + "\t" + action[sl].astype(object) + "\t" + lp + "\t" + filled
-                     + "\t" + lines)
+                     + "\t" + no_af + "\t" + es + "\t" + ss + "\t" + lines)
             handle.write("\n".join(keys_.tolist()) + "\n")
 
 
@@ -952,6 +956,7 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     actions: dict[str, int] = {}
     lp_values = array("d")
     duplicates = written = filled_written = 0
+    stats = {"af_missing": 0, "effect_sum": 0.0, "effect_abs_sum": 0.0, "effect_n": 0, "max_ss": -math.inf}
     current: tuple[str, str] | None = None
     seen: set[tuple[str, str]] = set()
     command = ["sort", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(work), *map(str, parts)]
@@ -959,7 +964,7 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     with open(body, "w", encoding="utf-8") as out, \
             subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
         for line in proc.stdout:
-            rank, pos, _row, low, high, action, lp, filled, record_line = line.split("\t", 8)
+            rank, pos, _row, low, high, action, lp, filled, no_af, es, ss, record_line = line.split("\t", 11)
             if (rank, pos) != current:
                 current, seen = (rank, pos), set()
             if (low, high) in seen:
@@ -973,6 +978,14 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
             lp_values.append(float(lp))
             written += 1
             filled_written += filled == "1"
+            stats["af_missing"] += no_af == "1"
+            effect, size = float(es), float(ss)
+            if math.isfinite(effect):
+                stats["effect_sum"] += effect
+                stats["effect_abs_sum"] += abs(effect)
+                stats["effect_n"] += 1
+            if math.isfinite(size):
+                stats["max_ss"] = max(stats["max_ss"], size)
     if proc.returncode != 0:
         raise RuntimeError(f"sort exited {proc.returncode} while merging {len(parts)} table pieces")
     qc["duplicates_removed"] = duplicates
@@ -983,10 +996,19 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
         qc["reference_alignment"] = {"performed": False, "reason": "no GRCh38 FASTA under <reference_root>/genome"}
         qc["warnings"].append("REF/ALT not aligned to the GRCh38 reference: no FASTA found (run src/reference_data/download_fasta_and_chains.sh)")
     check_output_rows(written, record, qc)
-    qc["lambda_gc"] = gwas_stats.lambda_gc(np.frombuffer(lp_values, dtype="float64") if written else np.array([]))
+    lp_array = np.frombuffer(lp_values, dtype="float64") if written else np.array([])
+    qc["lambda_gc"] = gwas_stats.lambda_gc(lp_array)
+    qc["qc_metrics"] = {
+        "variants": written, "n_p_below_5e-8": int((lp_array > -math.log10(5e-8)).sum()),
+        "mean_effect": stats["effect_sum"] / stats["effect_n"] if stats["effect_n"] else None,
+        "mean_abs_effect": stats["effect_abs_sum"] / stats["effect_n"] if stats["effect_n"] else None,
+        "af_missing_fraction": stats["af_missing"] / written if written else None,
+        "max_sample_size": stats["max_ss"] if math.isfinite(stats["max_ss"]) else None,
+    }
     header = work / "header.vcf"
     fields = sample_fields(record, config, qc, decisions["format_keys"])
     qc["sample_header"] = fields
+    qc["qc_flags"] = qc_flags(qc, fields)
     reference = fasta.path.name if fasta is not None else "GRCh38"
     header.write_text("\n".join(gwas_vcf.table_header(record, decisions["extras"], decisions["format_keys"], fields,
                                                        reference, qc.get("settings_hash", ""))) + "\n", encoding="utf-8")
@@ -994,6 +1016,38 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     started = time.perf_counter()
     gwas_vcf.bgzip_and_index([header, body], vcf_path)
     timings["compress_and_index"] = time.perf_counter() - started
+
+
+# OpenGWAS QC flags (opengwas-reports funcs/flags.R): flags for a reviewer, never a reason to stop.
+FLAG_RULES = {
+    "af_correlation": "absolute correlation of study and 1000 Genomes allele frequencies below 0.7",
+    "inflation_factor": "lambda GC above 1.2",
+    "n": "maximum sample size below 10,000",
+    "mean_EFFECT_05": "absolute mean effect above 0.5",
+    "mean_EFFECT_01": "absolute mean effect above 0.1",
+    "n_p_sig": "more than 1,000 variants at P < 5e-8",
+}
+
+
+def qc_flags(qc: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
+    """{flag: description} for each OpenGWAS QC flag raised (LDSC and clumping flags are not computed)."""
+    metrics = qc.get("qc_metrics", {}) or {}
+    r = (qc.get("af_concordance") or {}).get("pearson_r")
+    lam = qc.get("lambda_gc")
+    max_n = metrics.get("max_sample_size")
+    if max_n is None:
+        totals = [fields.get("TotalControls"), fields.get("TotalCases")]
+        max_n = sum(float(t) for t in totals if t is not None) or None
+    mean_effect = metrics.get("mean_effect")
+    raised = {
+        "af_correlation": r is not None and abs(r) < 0.7,
+        "inflation_factor": lam is not None and lam > 1.2,
+        "n": max_n is not None and max_n < 10_000,
+        "mean_EFFECT_05": mean_effect is not None and abs(mean_effect) > 0.5,
+        "mean_EFFECT_01": mean_effect is not None and abs(mean_effect) > 0.1,
+        "n_p_sig": int(metrics.get("n_p_below_5e-8", 0)) > 1000,
+    }
+    return {flag: FLAG_RULES[flag] for flag, on in raised.items() if on}
 
 
 def _number(value: Any) -> float | None:
@@ -1338,7 +1392,7 @@ def standardise_with_fallback(raw_path: Path, vcf_path: Path, record: dict[str, 
 def build_record(record: dict[str, Any], vcf: Path, index: Path, metadata: Path, qc_json: Path, plot: Path, qc: dict[str, Any]) -> dict[str, Any]:
     out = dict(record)
     out.update({"standard_vcf": str(vcf), "standard_index": str(index), "metadata_json": str(metadata), "qc_json": str(qc_json),
-                "plot_tiff": str(plot), "qc": qc})
+                "report_html": str(plot), "qc": qc})
     return out
 
 
@@ -1364,7 +1418,7 @@ def main() -> None:
     standard_index = Path(str(standard_vcf) + ".tbi")
     metadata_json = output_prefix.with_suffix(".metadata.json")
     qc_json = output_prefix.with_suffix(".qc.json")
-    plot = output_prefix.with_suffix(".tiff")
+    plot = output_prefix.with_suffix(".report.html")
     force, dry_run = parse_bool(args.force), parse_bool(args.dry_run)
     config = resolve_row_config(args.config_root, record, args.study_yaml)
     fingerprint = settings_fingerprint(manifest_values, config, args.reference_root)

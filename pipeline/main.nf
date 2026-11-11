@@ -32,7 +32,7 @@ process PREPARE_MANIFEST {
       --rows-dir rows \\
       --only-study "${params.only_study}" \\
       --force "${params.force}" \\
-      --qcplot "${params.qcplot}" \\
+      --report "${params.report}" \\
       --row-limit "${params.row_limit}"
     """
 }
@@ -66,8 +66,8 @@ process STANDARDISE_ROW {
       --workers ${task.cpus} \\
       --output standardise_record.json
 
-    if [[ "${params.qcplot}" == "true" ]]; then
-      python3 "${params.pipeline_root}/bin/qc_plot.py" \\
+    if [[ "${params.report}" == "true" ]]; then
+      python3 "${params.pipeline_root}/bin/report.py" \\
         --standardise-record standardise_record.json \\
         --force "${params.force}" \\
         --dry-run "${params.dry_run}" \\
@@ -92,7 +92,7 @@ process UPDATE_STATE {
     """
     python3 "${params.pipeline_root}/bin/update_state.py" \\
       --state-file "${params.work_root}/.standardise_state.tsv" \\
-      --qcplot "${params.qcplot}" \\
+      --report "${params.report}" \\
       --output state_update_summary.json \\
       --records ${records}
     """

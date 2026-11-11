@@ -18,9 +18,9 @@ class UpdateStateTests(unittest.TestCase):
     def record(self, name, with_plot=True):
         out = self.tmp / name
         out.mkdir()
-        paths = {key: out / f"{key}.out" for key in ["standard_vcf", "standard_index", "metadata_json", "qc_json", "plot_tiff"]}
+        paths = {key: out / f"{key}.out" for key in ["standard_vcf", "standard_index", "metadata_json", "qc_json", "report_html"]}
         for key, path in paths.items():
-            if key != "plot_tiff" or with_plot:
+            if key != "report_html" or with_plot:
                 path.write_text("x", encoding="utf-8")
         record = {"row_hash": f"hash_{name}", "study_id": "s", "output_id": name, "GWAS_location": "loc",
                   **{k: str(v) for k, v in paths.items()}, "qc": {"settings_hash": f"settings_{name}"}}
@@ -28,9 +28,9 @@ class UpdateStateTests(unittest.TestCase):
         path.write_text(json.dumps(record), encoding="utf-8")
         return path
 
-    def update(self, *records, qcplot="true"):
+    def update(self, *records, report="true"):
         summary = self.tmp / "summary.json"
-        run_script("update_state.py", "--state-file", self.state, "--qcplot", qcplot, "--output", summary,
+        run_script("update_state.py", "--state-file", self.state, "--report", report, "--output", summary,
                    *(["--records", *records] if records else []))
         return json.loads(summary.read_text(encoding="utf-8"))
 

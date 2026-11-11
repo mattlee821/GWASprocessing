@@ -95,15 +95,15 @@ class WrapperTests(unittest.TestCase):
         return lines[lines.index(flag) + 1]
 
     def test_invalid_boolean_option_is_rejected(self):
-        proc = self.run_wrapper(fake_repo(self.tmp), "--qcplot", "maybe")
+        proc = self.run_wrapper(fake_repo(self.tmp), "--report", "maybe")
         self.assertEqual(proc.returncode, 2)
-        self.assertIn("--qcplot", proc.stderr)
+        self.assertIn("--report", proc.stderr)
 
     def test_options_reach_nextflow_with_lowercase_booleans_and_local_defaults(self):
         repo = fake_repo(self.tmp)
-        proc = self.run_wrapper(repo, "--qcplot", "False")
+        proc = self.run_wrapper(repo, "--report", "False")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual((self.value("--qcplot"), self.value("-profile"), self.value("--row_limit")), ("false", "local", "1"))
+        self.assertEqual((self.value("--report"), self.value("-profile"), self.value("--row_limit")), ("false", "local", "1"))
         self.assertEqual(self.value("run"), str(repo / "pipeline" / "main.nf"))
 
     def test_environment_values_override_dotenv_defaults(self):
@@ -111,7 +111,7 @@ class WrapperTests(unittest.TestCase):
         work = self.tmp / "elsewhere" / "GWAS"
         proc = self.run_wrapper(repo, env=self.env(GWAS_WORK_ROOT=str(work)))
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual((self.value("--work_root"), self.value("--qcplot")), (str(work), "true"))
+        self.assertEqual((self.value("--work_root"), self.value("--report")), (str(work), "true"))
 
     def test_sbatch_spooled_copy_finds_the_repo_and_uses_the_slurm_profile(self):
         repo = fake_repo(self.tmp, dotenv="GWAS_PROFILE=local\n")

@@ -2,7 +2,7 @@
 """Record completed rows in the persistent state file.
 
 Usage:
-    update_state.py --state-file GWAS/.standardise_state.tsv --qcplot true --output state_update_summary.json \
+    update_state.py --state-file GWAS/.standardise_state.tsv --report true --output state_update_summary.json \
         [--records a.row_record.json b.row_record.json ...]
 A row is recorded only when all of its outputs exist and are non-empty; the settings hash stored with it
 lets prepare_manifest.py regenerate the row when settings change.
@@ -20,11 +20,11 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--state-file", required=True)
     parser.add_argument("--records", nargs="*", default=[])
-    parser.add_argument("--qcplot", default="true")
+    parser.add_argument("--report", default="true")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
-    qcplot = parse_bool(args.qcplot)
+    report = parse_bool(args.report)
     state = read_state(args.state_file)
     updated: list[str] = []
     ignored: list[dict[str, str]] = []
@@ -37,13 +37,13 @@ def main() -> None:
             "row_hash": record.get("row_hash", ""), "study_id": record.get("study_id", ""), "output_id": record.get("output_id", ""),
             "gwas_location": record.get("GWAS_location", ""), "standard_vcf": record.get("standard_vcf", ""),
             "standard_index": record.get("standard_index", ""), "metadata_json": record.get("metadata_json", ""),
-            "qc_json": record.get("qc_json", ""), "plot_tiff": record.get("plot_tiff", ""),
+            "qc_json": record.get("qc_json", ""), "report_html": record.get("report_html", ""),
             "settings_hash": (record.get("qc") or {}).get("settings_hash", "") or record.get("settings_hash", ""),
             "updated_at": utc_now(),
         }
         if not row["row_hash"]:
             ignored.append({"record": record_path, "reason": "no row_hash"})
-        elif not state_row_complete(row, qcplot):
+        elif not state_row_complete(row, report):
             ignored.append({"record": record_path, "reason": "outputs incomplete"})
         else:
             state[row["row_hash"]] = row

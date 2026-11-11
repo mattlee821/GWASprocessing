@@ -44,11 +44,11 @@ class PrepareManifestTests(unittest.TestCase):
         standardise_dir.mkdir(parents=True, exist_ok=True)
         files = {key: standardise_dir / name for key, name in [
             ("standard_vcf", "standardised.gwas.vcf.gz"), ("standard_index", "standardised.gwas.vcf.gz.tbi"),
-            ("metadata_json", "standardised.metadata.json"), ("qc_json", "standardised.qc.json"), ("plot_tiff", "standardised.tiff")]}
+            ("metadata_json", "standardised.metadata.json"), ("qc_json", "standardised.qc.json"), ("report_html", "standardised.report.html")]}
         for path in files.values():
             path.write_text("ok", encoding="utf-8")
         columns = ["row_hash", "study_id", "output_id", "gwas_location", "standard_vcf", "standard_index", "metadata_json",
-                   "qc_json", "plot_tiff", "settings_hash", "updated_at"]
+                   "qc_json", "report_html", "settings_hash", "updated_at"]
         values = [row["row_hash"], row["study_id"], row["output_id"], row["GWAS_location"], *map(str, files.values()), settings_hash, "now"]
         (self.tmp / ".standardise_state.tsv").write_text("\t".join(columns) + "\n" + "\t".join(values) + "\n", encoding="utf-8")
 

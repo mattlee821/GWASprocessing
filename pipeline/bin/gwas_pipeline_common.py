@@ -60,7 +60,7 @@ STATE_COLUMNS = [
     "standard_index",
     "metadata_json",
     "qc_json",
-    "plot_tiff",
+    "report_html",
     "settings_hash",
     "updated_at",
 ]
@@ -307,10 +307,10 @@ def write_state(path: str | Path, rows: Iterable[dict[str, str]]) -> None:
     atomic_write_text(path, buffer.getvalue())
 
 
-def state_row_complete(row: dict[str, str], qcplot: bool) -> bool:
+def state_row_complete(row: dict[str, str], report: bool) -> bool:
     required = ["standard_vcf", "standard_index", "metadata_json", "qc_json"]
-    if qcplot:
-        required.append("plot_tiff")
+    if report:
+        required.append("report_html")
     for key in required:
         value = row.get(key, "")
         if not value or not Path(value).exists() or Path(value).stat().st_size == 0:
