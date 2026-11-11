@@ -142,6 +142,23 @@ class StandardiseResult:
     def by_id(self) -> dict[str, dict[str, Any]]:
         return {row["ID"]: row for row in self.rows}
 
+    @property
+    def sample(self) -> dict[str, str]:
+        """The ##SAMPLE header line as a dict (quoted values unquoted)."""
+        return parse_sample_line(self.header)
+
+
+def parse_sample_line(header: list[str]) -> dict[str, str]:
+    import re as _re
+    line = next((h for h in header if h.startswith("##SAMPLE=<")), "")
+    pairs = _re.findall(r'([A-Za-z]+)=("(?:[^"\\]|\\.)*"|[^,>]*)', line[len("##SAMPLE=<"):])
+    out = {}
+    for key, value in pairs:
+        if value.startswith('"'):
+            value = _re.sub(r'\\(.)', r'\1', value[1:-1])
+        out[key] = value
+    return out
+
 
 def parse_vcf_rows(text: str) -> list[dict[str, Any]]:
     rows = []
@@ -165,7 +182,7 @@ def read_vcf_text(path: Path) -> str:
         return handle.read()
 
 
-def run_standardise(tmp: Path, raw: Path, reference_root: Path, *, analysis_qc: bool = False,
+def run_standardise(tmp: Path, raw: Path, reference_root: Path, *,
                     config_root: Path | None = None, study_yaml: str = "", force: bool = False,
                     env: dict[str, str] | None = None, name: str = "case", **record_overrides: Any) -> StandardiseResult:
     case = tmp / name
@@ -175,7 +192,7 @@ def run_standardise(tmp: Path, raw: Path, reference_root: Path, *, analysis_qc: 
     stage.write_text(json.dumps(base_record(raw, output_prefix, **record_overrides)), encoding="utf-8")
     out = case / "record.json"
     args = ["--stage-record", stage, "--config-root", config_root or (case / "no_manifests"),
-            "--reference-root", reference_root, "--analysis-qc", "true" if analysis_qc else "false",
+            "--reference-root", reference_root,
             "--force", "true" if force else "false", "--output", out]
     if study_yaml:
         args += ["--study-yaml", study_yaml]

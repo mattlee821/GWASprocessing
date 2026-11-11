@@ -90,9 +90,9 @@ class PiecewiseEquivalenceTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.raw, self.reference = synthetic_case(self.tmp)
 
-    def run_case(self, name: str, analysis_qc: bool, **env: str):
+    def run_case(self, name: str, **env: str):
         defaults = {"GWAS_TABLE_CHUNK": "1000000", "GWAS_WORKERS": "1"}  # whole table unless the test overrides
-        result = run_standardise(self.tmp, self.raw, self.reference, analysis_qc=analysis_qc, input_build="hg19",
+        result = run_standardise(self.tmp, self.raw, self.reference, input_build="hg19",
                                  name=name, env={**os.environ, **defaults, **env})
         self.assertEqual(result.returncode, 0, result.stderr)
         return result
@@ -108,27 +108,23 @@ class PiecewiseEquivalenceTests(unittest.TestCase):
         decision = lambda r: {k: r.qc["build_detection"][k] for k in ("build", "method", "declared")}  # noqa: E731
         self.assertEqual(decision(pieces), decision(whole))
 
-    def test_pieces_and_workers_match_the_whole_table_with_analysis_qc(self):
-        whole = self.run_case("whole", True)
+    def test_pieces_and_workers_match_the_whole_table(self):
+        whole = self.run_case("whole")
         self.assertEqual(whole.qc["table_pieces"]["pieces"], 1)
-        removed = whole.qc["qc_removed"]
-        self.assertGreater(removed["duplicate"], 0)
-        self.assertGreater(removed["palindromic"], 0)
+        self.assertGreater(whole.qc["duplicates_removed"], 0)
+        self.assertGreater(whole.qc["palindromic_resolution"]["palindromic_total"], 0)
         self.assertGreater(whole.qc["reference_alignment"]["dropped_mismatch"], 0)
         self.assertGreater(whole.qc["reference_alignment"]["swapped"], 0)
-        serial = self.run_case("serial", True, GWAS_TABLE_CHUNK="7")
+        serial = self.run_case("serial", GWAS_TABLE_CHUNK="7")
         self.assertEqual(serial.qc["table_pieces"]["pieces"], 36)  # 252 rows
         self.assert_same(whole, serial)
-        parallel = self.run_case("parallel", True, GWAS_TABLE_CHUNK="7", GWAS_WORKERS="3")
+        parallel = self.run_case("parallel", GWAS_TABLE_CHUNK="7", GWAS_WORKERS="3")
         self.assertEqual(parallel.qc["table_pieces"]["workers"], 3)
         self.assert_same(whole, parallel)
-
-    def test_pieces_match_the_whole_table_without_analysis_qc(self):
-        whole = self.run_case("whole_noqc", False)
-        self.assert_same(whole, self.run_case("pieces_noqc", False, GWAS_TABLE_CHUNK="5", GWAS_WORKERS="2"))
+        self.assert_same(whole, self.run_case("pieces5", GWAS_TABLE_CHUNK="5", GWAS_WORKERS="2"))
 
     def test_the_first_copy_of_a_duplicate_is_kept_across_pieces(self):
-        result = self.run_case("dups", True, GWAS_TABLE_CHUNK="4")
+        result = self.run_case("dups", GWAS_TABLE_CHUNK="4")
         self.assertNotIn("0.999", [row["FORMAT"]["ES"] for row in result.rows])
         self.assertNotIn("-0.999", [row["FORMAT"]["ES"] for row in result.rows])
 
@@ -150,14 +146,14 @@ class StepLogTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         self.raw, self.reference = synthetic_case(self.tmp)
 
-    def run_case(self, name: str, analysis_qc: bool):
-        result = run_standardise(self.tmp, self.raw, self.reference, analysis_qc=analysis_qc, input_build="hg19", name=name,
+    def run_case(self, name: str):
+        result = run_standardise(self.tmp, self.raw, self.reference, input_build="hg19", name=name,
                                  env={**os.environ, "GWAS_TABLE_CHUNK": "1000000", "GWAS_WORKERS": "1"})
         self.assertEqual(result.returncode, 0, result.stderr)
         return result
 
     def test_every_removed_row_is_counted_once_with_its_cause(self):
-        result = self.run_case("steps_qc", True)
+        result = self.run_case("steps")
         assert_reconciles(self, result.qc)
         causes = result.qc["incomplete_by_cause"]
         self.assertEqual(causes["rsid_not_in_coordinate_index"]["rows"], 1)
@@ -165,16 +161,19 @@ class StepLogTests(unittest.TestCase):
         self.assertEqual(causes["no_position_or_rsid"]["study_maf_below_threshold"], 1)
         self.assertEqual(causes["liftover_to_grch38_failed"]["rows"], 1)
         self.assertEqual(sum(c["rows"] for c in causes.values()), result.qc["rows_removed_missing_required"])
-        titles = [s["title"] for s in result.qc["steps"]]
-        self.assertLess(titles.index("Minor allele frequency >= 0.01"), titles.index("Palindromic (A/T, C/G) SNPs"))
-        log = Path(result.record["steps_log"]).read_text(encoding="utf-8")
-        self.assertIn("GRCh38 coordinates", log)
-        self.assertIn(f"Written: {result.qc['output_rows']:,} of {result.qc['input_rows']:,} input rows", log)
-        self.assertNotIn("UNRECONCILED", log)
-        self.assertIn(log, result.stderr)  # also printed, so it reaches the Nextflow task log
+        self.assertIn("GRCh38 coordinates", result.stderr)  # the summary is printed for the Nextflow task log
+        self.assertIn(f"Written: {result.qc['output_rows']:,} of {result.qc['input_rows']:,} input rows", result.stderr)
+        self.assertNotIn("UNRECONCILED", result.stderr)
 
-    def test_step_log_reconciles_without_analysis_qc(self):
-        assert_reconciles(self, self.run_case("steps_noqc", False).qc)
+    def test_sample_header_counts_add_up_and_match_the_step_log(self):
+        result = self.run_case("sample")
+        sample = {k: int(v) for k, v in result.sample.items() if k in ("TotalVariants", "VariantsNotRead", "HarmonisedVariants",
+                                                                         "VariantsNotHarmonised", "SwitchedAlleles")}
+        self.assertEqual(sample["TotalVariants"], sample["VariantsNotRead"] + sample["VariantsNotHarmonised"] + sample["HarmonisedVariants"])
+        self.assertEqual((sample["TotalVariants"], sample["HarmonisedVariants"]), (result.qc["input_rows"], result.qc["output_rows"]))
+        self.assertEqual(sample["VariantsNotHarmonised"],
+                         result.qc["duplicates_removed"] + result.qc["reference_alignment"]["dropped_mismatch"])
+        self.assertEqual(sample["SwitchedAlleles"], sum(r["INFO"]["HM"].endswith("swapped") for r in result.rows))
 
     def test_step_log_reconciles_for_a_lifted_gwas_vcf(self):
         reference = self.tmp / "vcf_reference"
@@ -184,12 +183,14 @@ class StepLogTests(unittest.TestCase):
             ("1", 1000, "rs1", "A", "G", "0.01:0.01:1:0.3:1000"), ("1", 2000, "rs2", "T", "C", "0.01:0.01:1:0.004:1000"),
             ("1", 1000, "rs1", "A", "G", "0.02:0.01:1:0.3:1000"), ("1", 500000, "rs3", "A", "G", "0.01:0.01:1:0.3:1000"),
             ("GL000192.1", 10, "rs4", "A", "G", "0.01:0.01:1:0.3:1000"), ("2", 3000, "rs5", "A", "G", "0.01:0.01:1:0.3:1000")])
-        result = run_standardise(self.tmp, raw, reference, analysis_qc=True, name="vcf_steps")
+        result = run_standardise(self.tmp, raw, reference, name="vcf_steps", input_build="hg19")
         self.assertEqual(result.returncode, 0, result.stderr)
         assert_reconciles(self, result.qc)
         self.assertEqual(result.qc["input_rows"], 6)
         coordinates = next(s for s in result.qc["steps"] if s["title"] == "GRCh38 coordinates")
         self.assertEqual(coordinates["removed"], 3)  # GL contig, and positions outside the chain on chromosomes 1 and 2
+        duplicates = next(s for s in result.qc["steps"] if s["title"] == "Duplicates")
+        self.assertEqual(duplicates["removed"], 1)
 
 
 class PreparedLookupCacheTests(unittest.TestCase):

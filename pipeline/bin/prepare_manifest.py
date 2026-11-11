@@ -5,7 +5,7 @@ for the current settings, and write one JSON file per row to run (no manifest te
 Usage:
     prepare_manifest.py --manifest manifests/main.tsv --work-root GWAS --state-file GWAS/.standardise_state.tsv \
         --output run_manifest.tsv --summary run_manifest_summary.json --rows-dir rows \
-        [--config-root manifests] [--reference-root references] [--study-yaml extra.yaml] [--analysis-qc false] \
+        [--config-root manifests] [--reference-root references] [--study-yaml extra.yaml] \
         [--only-study STUDYID] [--force false] [--qcplot true] [--row-limit 0] [--repo-root .]
 
 Exits 78 (configuration error) when any row is invalid, before anything is downloaded.
@@ -87,7 +87,6 @@ def main() -> None:
     parser.add_argument("--config-root", default="")
     parser.add_argument("--reference-root", default="")
     parser.add_argument("--study-yaml", default="")
-    parser.add_argument("--analysis-qc", default="false")
     parser.add_argument("--only-study", default="")
     parser.add_argument("--force", default="false")
     parser.add_argument("--qcplot", default="true")
@@ -95,7 +94,7 @@ def main() -> None:
     args = parser.parse_args()
 
     manifest = Path(args.manifest)
-    force, qcplot, analysis_qc = parse_bool(args.force), parse_bool(args.qcplot), parse_bool(args.analysis_qc)
+    force, qcplot = parse_bool(args.force), parse_bool(args.qcplot)
     work_root, repo_root = Path(args.work_root), Path(args.repo_root)
     config_root = Path(args.config_root) if args.config_root else manifest.parent
     reference_root = Path(args.reference_root) if args.reference_root else repo_root / "references"
@@ -134,7 +133,7 @@ def main() -> None:
         if errors:
             continue
         config = resolve_row_config(config_root, out_row, args.study_yaml)
-        out_row["settings_hash"] = settings_fingerprint(out_row, config, analysis_qc, reference_root)
+        out_row["settings_hash"] = settings_fingerprint(out_row, config, reference_root)
         expected = {
             "standard_vcf": str(output_prefix.with_suffix(".gwas.vcf.gz")),
             "standard_index": str(output_prefix.with_suffix(".gwas.vcf.gz")) + ".tbi",
@@ -172,7 +171,7 @@ def main() -> None:
         "manifest": str(manifest.resolve()), "state_file": str(Path(args.state_file).resolve()),
         "rows_to_run": len(to_run), "rows_eligible": len(eligible), "rows_deferred_due_to_limit": len(eligible) - len(to_run),
         "rows_skipped_complete": skipped, "rows_filtered": filtered, "force": force, "qcplot": qcplot,
-        "analysis_qc": analysis_qc, "row_limit": row_limit,
+        "row_limit": row_limit,
     })
 
 

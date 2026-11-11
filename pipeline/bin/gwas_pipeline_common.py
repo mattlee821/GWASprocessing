@@ -31,7 +31,7 @@ import yaml
 
 # Version of the output contract (VCF layout, QC JSON fields, standardisation rules). Bump it when a
 # change alters what is written, so completed rows are regenerated on the next run.
-OUTPUT_SCHEMA_VERSION = "2.0.0"
+OUTPUT_SCHEMA_VERSION = "3.0.0"
 
 # sysexits.h codes. Nextflow terminates the whole run on EX_CONFIG (an operator must fix configuration)
 # and records the row as failed without retrying on EX_DATAERR (the input itself is unusable).
@@ -79,6 +79,8 @@ SE_ALIASES = ["SE", "StdErr", "standard_error", "se"]
 P_ALIASES = ["P", "Pvalue", "Pval", "pval", "p_value", "P-value", "P.value", "p-value", "p.value", "p"]
 LOGP_ALIASES = ["LOG10P", "minus_log10_pval", "Plog10", "LP"]
 N_ALIASES = ["N", "TotalSampleSize", "OBS_CT", "n", "samplesize", "SS"]
+NCASE_ALIASES = ["NCASE", "N_CASE", "N_CASES", "NCASES", "Ncases", "n_cases", "N_CAS", "cases", "NC"]
+IMPINFO_ALIASES = ["IMPINFO", "INFO", "info", "Info", "IMP_INFO", "imputation_info", "INFO_SCORE", "info_score", "Rsq", "SI"]
 REF_ALIASES = ["REF", "ref"]
 ALT_ALIASES = ["ALT", "alt"]
 OR_ALIASES = ["OR", "odds_ratio", "hm_odds_ratio", "OddsRatio"]
@@ -425,11 +427,10 @@ def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
     return identity
 
 
-def settings_fingerprint(record: dict[str, Any], config: dict[str, Any], analysis_qc: bool, reference_root: str | Path) -> str:
+def settings_fingerprint(record: dict[str, Any], config: dict[str, Any], reference_root: str | Path) -> str:
     """Hash of everything that determines a row's outputs; a mismatch means the outputs are stale."""
     payload = {
         "schema": OUTPUT_SCHEMA_VERSION,
-        "analysis_qc": bool(analysis_qc),
         "row": {col: str(record.get(col, "") or "").strip() for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS},
         "config": {key: value for key, value in config.items() if key != "_config_path"},
         "references": reference_identity(reference_root),

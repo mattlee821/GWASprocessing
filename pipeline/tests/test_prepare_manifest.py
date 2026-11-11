@@ -72,8 +72,8 @@ class PrepareManifestTests(unittest.TestCase):
         self.prepare(manifest)
         row, settings_hash = self.rows()[0], self.row_jsons()[0]["settings_hash"]
         self.complete_outputs(row, settings_hash)
-        self.prepare(manifest, "--analysis-qc", "true")
-        self.assertEqual(len(self.rows()), 1, "turning on analysis QC must regenerate the row")
+        self.prepare(manifest)
+        self.assertEqual(len(self.rows()), 0, "unchanged settings must not regenerate a complete row")
         (self.config_root / "locke_2015_25673413.yaml").write_text("input_build: hg19\n", encoding="utf-8")
         self.prepare(manifest)
         self.assertEqual(len(self.rows()), 1, "a new study YAML must regenerate the row")

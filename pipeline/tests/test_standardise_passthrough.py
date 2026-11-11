@@ -31,16 +31,18 @@ class AdaptedPassthroughTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
 
-    def test_existing_gwas_vcf_gets_manifest_sex_metadata_and_detected_build(self):
+    def test_existing_gwas_vcf_gets_manifest_sex_metadata_and_declared_build(self):
         raw = write_vcf(self.tmp / "existing_gwas.vcf", [(1, 1000, "rs1", "G", "A", "0.2:0.05:3:0.1:1000", "POS19=900;SNPID=1:1000")],
                         contig=None, extra_header=["##source=test"])
-        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", sex="male", ancestry="EUR")
+        undeclared = run_standardise(self.tmp, raw, EXAMPLES / "reference", sex="male", ancestry="EUR", name="undeclared")
+        self.assertEqual(undeclared.returncode, 78)  # 1 record is too few to detect a build, and none is declared
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", sex="male", ancestry="EUR", input_build="hg19")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.metadata["sex"], "male")
-        self.assertIn("##sex=male", result.header)
+        self.assertEqual(result.sample["Sex"], "male")
         row = result.rows[0]
-        self.assertEqual((row["POS"], row["INFO"]["POS19"]), (1100, "1000"))
-        self.assertEqual(result.qc["source_build"], "GRCh37")
+        self.assertEqual(row["POS"], 1100)
+        self.assertEqual((result.qc["build_detection"]["build"], result.qc["build_detection"]["method"]), ("hg19", "declared"))
 
     def test_passthrough_hg19_lifted_to_grch38(self):
         reference = self.tmp / "reference"
@@ -51,9 +53,9 @@ class AdaptedPassthroughTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.metadata["coordinate_build"], "GRCh38")
         row = result.rows[0]
-        self.assertEqual((row["POS"], row["ID"], row["INFO"]["POS19"]), (785910, "rs12565286", "721290"))
-        self.assertIn("##ancestry=ALL", result.header)
-        self.assertIn("##sex=combined", result.header)
+        self.assertEqual((row["POS"], row["ID"]), (785910, "rs12565286"))
+        self.assertEqual(result.sample["Ancestry"], "ALL")
+        self.assertEqual(result.sample["Sex"], "combined")
 
     def test_passthrough_output_is_position_sorted(self):
         raw = write_vcf(self.tmp / "unsorted.gwas.vcf", [("1", 5000, "rsB", "A", "G", "0.02:0.01:1:0.3:1000"),
@@ -63,7 +65,6 @@ class AdaptedPassthroughTests(unittest.TestCase):
         result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([r["POS"] for r in result.rows], [2000, 5000, 9000])
-        self.assertEqual(result.rows[0]["INFO"]["POS19"], "1900")
 
     def test_passthrough_palindromic_strand_resolution(self):
         reference = self.tmp / "reference"
@@ -74,15 +75,16 @@ class AdaptedPassthroughTests(unittest.TestCase):
             ("1", 1000, "rsP1", "T", "A", "0.1:0.01:1:0.20:1000"), ("1", 2000, "rsP2", "G", "C", "0.1:0.01:1:0.85:1000"),
             ("1", 3000, "rsP3", "T", "A", "0.1:0.01:1:0.47:1000"), ("1", 4000, "rsN1", "G", "A", "0.1:0.01:1:0.30:1000")],
             contig="##contig=<ID=1,length=248956422,assembly=GRCh38>")
-        result = run_standardise(self.tmp, raw, reference, analysis_qc=True, source_type="opengwas")
+        result = run_standardise(self.tmp, raw, reference, source_type="opengwas")
         self.assertEqual(result.returncode, 0, result.stderr)
-        variants = {r["ID"]: (r["REF"], r["ALT"]) for r in result.rows}
-        self.assertEqual(variants.get("rsP1"), ("T", "A"))
-        self.assertEqual(variants.get("rsP2"), ("C", "G"))
-        self.assertNotIn("rsP3", variants)
+        variants = {r["INFO"]["SNPID"]: (r["REF"], r["ALT"], r["INFO"]["HM"]) for r in result.rows}
+        self.assertEqual(variants.get("rsP1")[:2], ("T", "A"))
+        self.assertEqual(variants.get("rsP2")[:2], ("C", "G"))
+        self.assertTrue(variants["rsP2"][2].startswith("palindrome_complemented"))
+        self.assertTrue(variants["rsP3"][2].startswith("palindrome_ambiguous"))
         self.assertIn("rsN1", variants)
         detail = result.qc["palindromic_resolution"]
-        self.assertEqual((detail["flipped"], detail["kept_same_strand"], detail["dropped_ambiguous"]), (1, 1, 1))
+        self.assertEqual((detail["flipped"], detail["kept_same_strand"], detail["ambiguous_frequency_near_half"]), (1, 1, 1))
 
 
 class PassthroughRegressionTests(unittest.TestCase):
@@ -95,13 +97,13 @@ class PassthroughRegressionTests(unittest.TestCase):
         result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
         self.assertEqual(result.returncode, 0, result.stderr)
         row = result.rows[0]
-        self.assertEqual((row["CHROM"], row["POS"], row["INFO"]["POS19"]), ("1", 1100, "1000"))
+        self.assertEqual((row["CHROM"], row["POS"]), ("1", 1100))
 
     def test_chr_prefixed_grch38_contigs_are_renamed(self):
         raw = write_vcf(self.tmp / "chr38.gwas.vcf", [("chr1", 2000, "rs2", "C", "T", "0.1:0.02:6:0.3:5000")],
                         contig="##contig=<ID=chr1,length=248956422,assembly=GRCh38>")
         row = run_standardise(self.tmp, raw, EXAMPLES / "reference").rows[0]
-        self.assertEqual((row["CHROM"], row["POS"], row["INFO"]["POS19"]), ("1", 2000, "1900"))
+        self.assertEqual((row["CHROM"], row["POS"]), ("1", 2000))
 
     def test_minus_strand_liftover_complements_ref_and_alt(self):
         reference = self.tmp / "reference"
@@ -121,9 +123,9 @@ class PassthroughRegressionTests(unittest.TestCase):
                                  metadata={"gwasinfo": [{"id": "ieu-b-1", "sample_size": 46468, "build": "HG19/GRCh37"}]})
         self.assertEqual(result.returncode, 0, result.stderr)
         row = result.rows[0]
-        self.assertEqual((row["FORMAT"]["SS"], row["FORMAT"]["ID"]), ("46468", "rs1"))
-        self.assertTrue(any(line.startswith("##FORMAT=<ID=SS,") for line in result.header))
-        self.assertEqual(result.qc["sample_size_source"], "gwasinfo")
+        self.assertEqual(row["FORMAT"]["ID"], "rs1")
+        self.assertNotIn("SS", row["FORMAT"])  # per-variant SS only from the data; the study total goes in ##SAMPLE
+        self.assertEqual((result.sample["TotalControls"], result.sample["StudyType"]), ("46468", "Continuous"))
 
     def test_sample_size_is_added_to_records_that_lack_it_even_when_the_header_declares_it(self):
         # OpenGWAS headers declare FORMAT/SS although many of their records carry no SS value.
@@ -136,9 +138,9 @@ class PassthroughRegressionTests(unittest.TestCase):
                                  metadata={"gwasinfo": [{"id": "ieu-b-1", "sample_size": 46468}]})
         self.assertEqual(result.returncode, 0, result.stderr)
         sizes = {r["ID"]: r["FORMAT"].get("SS") for r in result.rows}
-        self.assertEqual(sizes, {"rs1": "46468", "rs2": "777"})
+        self.assertEqual(sizes, {"rs1": ".", "rs2": "777"})
         self.assertEqual(sum(line.startswith("##FORMAT=<ID=SS,") for line in result.header), 1)
-        self.assertEqual(result.qc["sample_size_filled_records"], 1)
+        self.assertEqual(result.sample["TotalControls"], "46468")
 
     def test_source_build_headers_are_replaced_by_grch38_declarations(self):
         raw = write_vcf(self.tmp / "b37.gwas.vcf", [("1", 1000, "rs1", "G", "A", "0.1:0.02:6:0.3:5000")],
@@ -147,9 +149,8 @@ class PassthroughRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([h for h in result.header if h.startswith("##reference")], ["##reference=GRCh38"])
         self.assertFalse(any("GRCh37" in h for h in result.header if h.startswith("##contig")))
-        self.assertEqual([h for h in result.header if h.startswith("##study_id")], ["##study_id=test_2026_1"])
-        out_vcf = Path(result.record["standard_vcf"])
-        self.assertEqual(standardise_gwas.detect_vcf_build(out_vcf), "GRCh38")
+        self.assertEqual(result.sample["StudyID"], "test_2026_1")
+        self.assertTrue(all("assembly=GRCh38" in h for h in result.header if h.startswith("##contig")))
 
     def test_undeclared_build_that_cannot_be_detected_fails_loudly(self):
         raw = write_vcf(self.tmp / "nobuild.gwas.vcf", [("1", 123457, "rsX", "G", "A", "0.1:0.02:6:0.3:5000")], contig="")
@@ -172,7 +173,6 @@ class PassthroughRegressionTests(unittest.TestCase):
         row = result.rows[0]
         self.assertEqual((row["REF"], row["ALT"]), ("A", "G"))
         self.assertEqual((row["FORMAT"]["ES"], row["FORMAT"]["AF"], row["FORMAT"]["EZ"], row["FORMAT"]["SE"]), ("-0.1", "0.7", "-5", "0.02"))
-        self.assertEqual(row["INFO"]["AF"], "0.7")
         self.assertEqual(result.qc["reference_alignment"]["swapped"], 1)
 
     def test_no_liftable_records_is_a_data_error(self):
@@ -196,10 +196,10 @@ class PassthroughRegressionTests(unittest.TestCase):
             ("1", 2000, "rs2", "T", "C", "-0.1:0.02:6:0.7:5000"), ("1", 3000, "rs3", "G", "A", "0.1:0.02:6:0.3:5000")],
             contig="##contig=<ID=1,length=248956422,assembly=GRCh38>")
         env = {**os.environ, "GWAS_PASSTHROUGH_CHUNK": "2"}
-        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", analysis_qc=True, env=env)
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", env=env)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual([(r["POS"], r["REF"], r["ALT"]) for r in result.rows], [(1000, "A", "G"), (2000, "C", "T"), (3000, "G", "A")])
-        self.assertEqual(result.qc["qc_removed"]["duplicate"], 1)
+        self.assertEqual(result.qc["duplicates_removed"], 1)
 
     def test_alignment_counts_add_up_across_chunks(self):
         sequence = ["N"] * 3500
@@ -218,11 +218,11 @@ class PassthroughRegressionTests(unittest.TestCase):
         scratch = self.tmp / "scratch"
         scratch.mkdir()
         raw = write_vcf(self.tmp / "clean.gwas.vcf", [("1", 1000, "rs1", "G", "A", "0.1:0.02:6:0.3:5000")])
-        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", analysis_qc=True, env={**os.environ, "GWAS_TMPDIR": str(scratch)})
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference", env={**os.environ, "GWAS_TMPDIR": str(scratch)})
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = sorted(p.name for p in Path(result.record["standard_vcf"]).parent.iterdir())
         self.assertEqual(outputs, ["standardised.gwas.vcf.gz", "standardised.gwas.vcf.gz.tbi", "standardised.metadata.json",
-                                   "standardised.qc.json", "standardised.steps.txt"])
+                                   "standardised.qc.json"])
         self.assertEqual(list(scratch.iterdir()), [])
 
     def test_chromosomes_are_written_in_numeric_order(self):

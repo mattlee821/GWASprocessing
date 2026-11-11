@@ -47,11 +47,12 @@ from gwas_pipeline_common import (
     CHR_ALIASES,
     CI_LOWER_ALIASES,
     CI_UPPER_ALIASES,
-    COMPLEMENT,
     EA_ALIASES,
     EAF_ALIASES,
+    IMPINFO_ALIASES,
     LOGP_ALIASES,
     N_ALIASES,
+    NCASE_ALIASES,
     OA_ALIASES,
     OR_ALIASES,
     OUTPUT_SCHEMA_VERSION,
@@ -74,7 +75,6 @@ from gwas_pipeline_common import (
     is_gwas_vcf,
     make_work_dir,
     normalize_build_value,
-    normalize_chromosome,
     normalize_chromosome_series,
     normalize_delimiter_value,
     numeric_series,
@@ -93,17 +93,19 @@ FIELD_ALIASES = {
     "CHR": CHR_ALIASES, "POS": POS_ALIASES, "POS19": POS19_ALIASES, "POS38": POS38_ALIASES, "SNP": RSID_ALIASES,
     "SNPID": SNPID_ALIASES, "EA": EA_ALIASES, "OA": OA_ALIASES, "EAF": EAF_ALIASES, "BETA": BETA_ALIASES,
     "SE": SE_ALIASES, "P": P_ALIASES, "LOG10P": LOGP_ALIASES, "N": N_ALIASES, "REF": REF_ALIASES, "ALT": ALT_ALIASES,
-    "OR": OR_ALIASES, "CI_LOWER": CI_LOWER_ALIASES, "CI_UPPER": CI_UPPER_ALIASES,
+    "OR": OR_ALIASES, "CI_LOWER": CI_LOWER_ALIASES, "CI_UPPER": CI_UPPER_ALIASES, "NCASE": NCASE_ALIASES,
+    "IMPINFO": IMPINFO_ALIASES,
 }
 # Allele-dependent columns must come from one family (original or GWAS Catalog harmonised hm_*).
 FAMILY_FIELDS = ("EA", "OA", "BETA", "EAF", "OR", "CI_LOWER", "CI_UPPER", "CHR", "POS")
 KNOWN_CONFIG_KEYS = {"description", "input_build", "delimiter", "columns", "exclude", "exclusions", "joins",
-                     "transforms", "extras", "analysis_qc", "format", "reference_population", "_config_path"}
+                     "transforms", "extras", "format", "reference_population", "palindromic_tolerance", "sample",
+                     "study_type", "ncase", "ncontrol", "sample_size", "_config_path"}
 KNOWN_TRANSFORMS = {"strip_hash_header", "uppercase_alleles", "derive_oa_from_ref_alt"}
 REQUIRED_FIELDS = ("CHR", "POS38", "EA", "OA", "BETA", "SE", "LP")
 RETENTION_WARNING = 0.5
-CONTRADICTION_MIN_HITS = 10  # a declared build is only overruled by this many matching positions
 AF_CONCORDANCE_MIN_N = 1000
+BUILD_MIN_HITS = 20  # a build detected from the data needs this many matching variants (as GwasDataImport requires)
 Z_975 = NormalDist().inv_cdf(0.975)
 _inv_cdf = np.vectorize(NormalDist().inv_cdf, otypes=[float])
 STRAND_TAG = "GWASPROCESSING_LIFT_STRAND"
@@ -212,13 +214,26 @@ def recursive_metadata_value(payload: Any, keys: set[str]) -> Any:
 
 
 def declared_build(record: dict[str, Any], config: dict[str, Any]) -> tuple[str, str]:
+    """A build stated outside the data: manifest or study YAML, then source metadata, then a VCF header's assembly."""
     configured = normalize_build_value(config.get("input_build") or record.get("input_build"))
     if configured:
         return configured, "manifest_or_yaml"
     metadata = normalize_build_value(recursive_metadata_value(record.get("metadata", {}),
                                                               {"build", "genome_build", "assembly", "coordinate_build", "genome_assembly"}))
-    return (metadata, "source_metadata") if metadata else ("", "")
+    if metadata:
+        return metadata, "source_metadata"
+    header = normalize_build_value(config.get("_vcf_header_build"))
+    return (header, "vcf_header") if header else ("", "")
 
+
+def build_from_vcf_header(header: list[str]) -> str:
+    """hg19 or hg38 from ##contig assembly= or ##reference, else ''."""
+    text = " ".join(line for line in header if line.startswith(("##contig", "##reference", "##assembly"))).lower()
+    for token, build in (("grch38", "hg38"), ("hg38", "hg38"), ("b38", "hg38"), ("grch37", "hg19"), ("hg19", "hg19"),
+                         ("b37", "hg19"), ("human_g1k_v37", "hg19"), ("hs37d5", "hg19")):
+        if token in text:
+            return build
+    return ""
 
 # ---------------------------------------------------------------------------------------------------
 # Table path: column selection and canonical frame
@@ -329,7 +344,7 @@ def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[
 
     out = pd.DataFrame(index=df.index)
     out["CHR"] = normalize_chromosome_series(take("CHR"))
-    for field in ("POS", "POS19", "POS38", "EAF", "BETA", "SE", "P", "LOG10P", "OR", "CI_LOWER", "CI_UPPER"):
+    for field in ("POS", "POS19", "POS38", "EAF", "BETA", "SE", "P", "LOG10P", "OR", "CI_LOWER", "CI_UPPER", "NCASE", "EZ", "IMPINFO"):
         out[field] = numeric_series(take(field)).astype("float64")
     out["N"] = normalise_sample_size(take("N"), qc)
     out["SNP"] = take("SNP").astype("string").astype(object)
@@ -400,15 +415,12 @@ def fill_positions_from_ids(out: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFra
     return out
 
 
-def contradicts(declared: str, detection: dict[str, Any]) -> bool:
-    detected = detection.get("build", "")
-    if not declared or not detected or detected == declared:
-        return False
-    return int(detection.get(f"hits_{detected}", 0)) >= CONTRADICTION_MIN_HITS
-
-
 def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[str, Any], lookup: pd.DataFrame,
                         reference_root: str, qc: dict[str, Any]) -> str:
+    """The input build, detected from the data in the first instance: a fixed-seed sample of positions and alleles
+    is matched to the reference under each build (gwas_coordinates.detect_build). A declared build (manifest, YAML,
+    source metadata, VCF header) is used only when detection makes no call; a declared build that disagrees with a
+    detected one is reported as a warning, not used."""
     declared, declared_source = declared_build(record, config)
     rows = out[np.isfinite(out["POS"]) & ~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])]
     detection: dict[str, Any] = {"build": "", "reason": "reference lookup without alleles"}
@@ -417,22 +429,25 @@ def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[
         detection = coords.detect_build(rows["CHR"], rows["POS"], rows["EA"], rows["OA"], lookup, lifter)
     qc["build_detection"] = {**detection, "declared": declared, "declared_source": declared_source}
     names = {"hg19": "GRCh37", "hg38": "GRCh38"}
-    if contradicts(declared, detection):
+    detected = detection.get("build", "")
+    if detected and int(detection.get(f"hits_{detected}", 0)) < BUILD_MIN_HITS:
+        qc["build_detection"]["below_minimum_hits"] = BUILD_MIN_HITS
+        detected = ""
+    if detected:
+        if declared and declared != detected:
+            qc["warnings"].append(f"declared build {names.get(declared, declared)} ({declared_source}) disagrees with the "
+                                  f"build detected from the data, {names[detected]}; the detected build was used")
+        qc["build_detection"].update({"build": detected, "method": "detected"})
+        return detected
+    if not declared:
         raise config_error(
-            f"Row {record.get('study_id')}/{record.get('output_id')}: input_build is declared as {names[declared]} "
-            f"({declared_source}) but the positions match {names[detection['build']]} "
-            f"(GRCh37 hits {detection['hits_hg19']}, GRCh38 hits {detection['hits_hg38']} of {detection['sampled']} sampled). "
-            "Correct input_build in the manifest or study YAML."
-        )
-    build = declared or detection.get("build", "")
-    if not build:
-        raise config_error(
-            f"Row {record.get('study_id')}/{record.get('output_id')}: could not determine the genome build "
+            f"Row {record.get('study_id')}/{record.get('output_id')}: could not detect the genome build from the data "
             f"(GRCh37 hits {detection.get('hits_hg19', 0)}, GRCh38 hits {detection.get('hits_hg38', 0)} of "
-            f"{detection.get('sampled', 0)} sampled positions). Set input_build (hg19 or hg38) in the manifest or study YAML."
+            f"{detection.get('sampled', 0)} sampled positions) and none is declared. Set input_build (hg19 or hg38) in the "
+            "manifest or study YAML."
         )
-    qc["build_detection"].update({"build": build, "method": "declared" if declared else "detected"})
-    return build
+    qc["build_detection"].update({"build": declared, "method": "declared"})
+    return declared
 
 
 def fill_coordinates_by_rsid(out: pd.DataFrame, reference_root: str, lookup: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFrame:
@@ -519,7 +534,8 @@ def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, A
 # add up to the rows removed. Coordinate causes come first because a row without a position cannot be used whatever
 # its statistics.
 INCOMPLETE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "liftover_to_grch38_failed", "chromosome_not_primary",
-                     "invalid_position", "missing_allele", "missing_beta", "missing_or_invalid_se", "missing_or_invalid_p")
+                     "invalid_position", "missing_allele", "invalid_allele", "missing_beta", "missing_or_invalid_se",
+                     "missing_or_invalid_p")
 
 
 def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.ndarray:
@@ -534,6 +550,7 @@ def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.nd
         ~checks["CHR"],
         ~checks["POS38"],
         ~checks["EA"] | ~checks["OA"],
+        ~checks["ALLELES"],
         ~checks["BETA"],
         ~checks["SE"],
         ~checks["LP"],
@@ -542,11 +559,14 @@ def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.nd
 
 
 def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any], maf_threshold: float = 0.01) -> pd.DataFrame:
+    ea, oa = upper_alleles(out["EA"]), upper_alleles(out["OA"])
     checks = {
         "CHR": out["CHR"].astype(str).isin(PRIMARY_CHROMS).to_numpy(),
         "POS38": (np.isfinite(out["POS38"]) & (out["POS38"] > 0)).to_numpy(),
         "EA": (upper_alleles(out["EA"]) != "").to_numpy(),
         "OA": (upper_alleles(out["OA"]) != "").to_numpy(),
+        # VCF alleles must be bases: I/D codes, "-" and identical alleles cannot be written as REF/ALT
+        "ALLELES": (ea.str.fullmatch(r"[ACGT]+").fillna(False) & oa.str.fullmatch(r"[ACGT]+").fillna(False) & (ea != oa)).to_numpy(dtype=bool),
         "BETA": np.isfinite(out["BETA"]).to_numpy(),
         "SE": (np.isfinite(out["SE"]) & (out["SE"] > 0)).to_numpy(),
         "LP": (np.isfinite(out["LP"]) & (out["LP"] >= 0)).to_numpy(),
@@ -604,8 +624,8 @@ def check_output_rows(written: int, record: dict[str, Any], qc: dict[str, Any]) 
     input_rows = qc.get("input_rows", 0)
     retained = written / input_rows if input_rows else 1.0
     if retained < RETENTION_WARNING:
-        qc["warnings"].append(f"retained {written} of {input_rows} input rows ({retained:.0%}); see missing_required_by_field, "
-                              "liftover and qc_removed")
+        qc["warnings"].append(f"retained {written} of {input_rows} input rows ({retained:.0%}); see the step log (qc.json steps, "
+                              "incomplete_by_cause and liftover)")
     qc["output_rows"] = int(written)
 
 
@@ -633,8 +653,9 @@ def candidate_columns(raw_path: Path, sep: str, config: dict[str, Any]) -> list[
 # to use, LOG10P sign, deriving OA from REF/ALT, the genome build) are taken from the first piece.
 
 TABLE_CHUNK = 1_000_000  # table rows per piece (GWAS_TABLE_CHUNK overrides)
+BUILD_HEAD_ROWS = 200_000  # rows read from the start of the file to detect the build, whatever the piece size
 ROW_COLUMN = "_gwasprocessing_row"  # input row number, carried through each piece to restore input order
-FIRST_PIECE_ONLY = ("build_detection", "analysis_qc_settings", "source_columns")
+FIRST_PIECE_ONLY = ("build_detection", "source_columns")
 
 
 def table_chunk_rows(config: dict[str, Any]) -> int | None:
@@ -709,30 +730,41 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
     lap("rsid_coordinates")
     out = establish_dual_build(out, reference_root, qc)
     lap("liftover")
-    maf_threshold = float({**alleles.ANALYSIS_QC_DEFAULTS, **(config.get("analysis_qc") or {})}.get("maf_threshold", 0.01))
-    out = drop_incomplete_rows(out, qc, maf_threshold)
+    out = drop_incomplete_rows(out, qc)
     out, moments = annotate_with_reference(out, lookup, qc)
     lap("reference_annotation")
-    if settings["analysis_qc"]:
-        out = alleles.apply_analysis_qc(out, config.get("analysis_qc"), qc, deduplicate_rows=False)
-    low, high = alleles.dedup_alleles(out)  # the key deduplication uses, before alignment can complement alleles
-    lap("analysis_qc")
+    out = alleles.resolve_palindromic_strand(out, qc, settings["palindromic_tolerance"])
+    low, high = alleles.dedup_alleles(out)  # the key deduplication uses, before alignment can swap alleles
+    lap("palindromic_strand")
     if fasta is not None:
         out, action = alleles.orient_to_reference(out, fasta)
     else:
-        action = np.full(len(out), "keep", dtype=object)
+        action = np.full(len(out), "unalignable", dtype=object)
+    out["HM"] = harmonisation_action(out["PAL"].to_numpy(dtype=object), action)
     lap("grch38_alignment")
-    write_piece_lines(part, out, rows[out.index.to_numpy()], low, high, action, extras)
+    keys = settings.get("format_keys") or gwas_vcf.format_keys(c for c in gwas_vcf.OPTIONAL_FORMAT if cols.get(c))
+    write_piece_lines(part, out, rows[out.index.to_numpy()], low, high, action, extras, keys, settings["afs_label"])
     lap("write_piece")
-    decisions = {"cols": cols, "extras": extras, "build": build,
+    decisions = {"cols": cols, "extras": extras, "build": build, "format_keys": keys,
                  "negate_log10p": bool(qc.get("p_value_source", {}).get("log10p_negated", False)),
                  "derive_oa": bool(qc.get("derived_oa_from_ref_alt", False))}
     return {"qc": qc, "moments": moments, "decisions": decisions, "part": str(part), "timings": timings}
 
 
+def harmonisation_action(pal: np.ndarray, action: np.ndarray) -> np.ndarray:
+    """INFO/HM per row from the palindromic decision (PAL) and the GRCh38 alignment action."""
+    base = {"keep": "forward", "swap": "swapped", "complement": "complemented", "complement_swap": "complemented_swapped",
+            "indel_unmatched": "unverified", "unalignable": "unverified", "drop": "dropped"}
+    words = np.array([base.get(str(a), "unverified") for a in action], dtype=object)
+    swapped = np.isin(action, ["swap", "complement_swap"])
+    pal_words = np.array(["palindrome_" + str(p) + ("_swapped" if s else "") for p, s in zip(pal, swapped)], dtype=object)
+    return np.where(pal != "", pal_words, words)
+
+
 def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.ndarray, high: np.ndarray,
-                      action: np.ndarray, extras: list[str]) -> None:
-    """One line per row: chromosome rank, POS38, input row, dedup allele pair, alignment action, LP, VCF record.
+                      action: np.ndarray, extras: list[str], keys: list[str], afs_label: str) -> None:
+    """One line per row: chromosome rank, POS38, input row, dedup allele pair, alignment action, LP, AF-filled flag,
+    VCF record.
 
     The leading fields let `sort` restore genome order with input order as the tie-break; LP is kept at full
     precision for lambda GC. Rows that alignment will drop are kept so they still claim their dedup key."""
@@ -741,50 +773,53 @@ def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.n
         for start in range(0, len(out), step):
             piece = out.iloc[start:start + step]
             sl = slice(start, start + step)
-            lines = np.array(gwas_vcf.table_body_lines(piece, extras), dtype=object)
+            lines = np.array(gwas_vcf.table_body_lines(piece, extras, keys, afs_label), dtype=object)
             rank = gwas_vcf.chrom_ranks(piece["CHR"]).astype(str).astype(object)
             pos = piece["POS38"].to_numpy(dtype="float64").astype("int64").astype(str).astype(object)
             lp = np.char.mod("%.17g", piece["LP"].to_numpy(dtype="float64")).astype(object)
-            keys = (rank + "\t" + pos + "\t" + rows[sl].astype(str).astype(object) + "\t" + low[sl].astype(object)
-                    + "\t" + high[sl].astype(object) + "\t" + action[sl].astype(object) + "\t" + lp + "\t" + lines)
-            handle.write("\n".join(keys.tolist()) + "\n")
+            filled = ((piece["EAF_SOURCE"].astype(str).to_numpy() == "reference")
+                      & np.isfinite(piece["EAF"].to_numpy(dtype="float64"))).astype(int).astype(str).astype(object)
+            keys_ = (rank + "\t" + pos + "\t" + rows[sl].astype(str).astype(object) + "\t" + low[sl].astype(object)
+                     + "\t" + high[sl].astype(object) + "\t" + action[sl].astype(object) + "\t" + lp + "\t" + filled
+                     + "\t" + lines)
+            handle.write("\n".join(keys_.tolist()) + "\n")
 
 
-def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], extras: list[str],
-                 deduplicate: bool, fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None) -> None:
-    """Sort all pieces by position, deduplicate, drop alignment failures, write and index the VCF."""
+def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
+                 decisions: dict[str, Any], fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None) -> None:
+    """Sort all pieces by position, remove duplicates, drop alignment failures, then write the header (whose
+    ##SAMPLE counts are final only now) in front of the body, bgzip and index."""
     timings = {} if timings is None else timings
     started = time.perf_counter()
-    plain = work / "table.vcf"
+    body = work / "body.vcf"
     actions: dict[str, int] = {}
     lp_values = array("d")
-    duplicates = written = 0
+    duplicates = written = filled_written = 0
     current: tuple[str, str] | None = None
     seen: set[tuple[str, str]] = set()
     command = ["sort", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(work), *map(str, parts)]
     env = {**os.environ, "LC_ALL": "C"}
-    with open(plain, "w", encoding="utf-8") as out, \
+    with open(body, "w", encoding="utf-8") as out, \
             subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
-        out.write("\n".join(gwas_vcf.table_header(record, extras)) + "\n")
         for line in proc.stdout:
-            rank, pos, _row, low, high, action, lp, body = line.split("\t", 7)
-            if deduplicate:
-                if (rank, pos) != current:
-                    current, seen = (rank, pos), set()
-                if (low, high) in seen:
-                    duplicates += 1
-                    continue
-                seen.add((low, high))
+            rank, pos, _row, low, high, action, lp, filled, record_line = line.split("\t", 8)
+            if (rank, pos) != current:
+                current, seen = (rank, pos), set()
+            if (low, high) in seen:
+                duplicates += 1
+                continue
+            seen.add((low, high))
             actions[action] = actions.get(action, 0) + 1
             if action == "drop":
                 continue
-            out.write(body)
+            out.write(record_line)
             lp_values.append(float(lp))
             written += 1
+            filled_written += filled == "1"
     if proc.returncode != 0:
         raise RuntimeError(f"sort exited {proc.returncode} while merging {len(parts)} table pieces")
-    if deduplicate:
-        qc["qc_removed"]["duplicate"] = qc["qc_removed"].get("duplicate", 0) + duplicates
+    qc["duplicates_removed"] = duplicates
+    qc["af_filled_written"] = filled_written
     if fasta is not None:
         qc["reference_alignment"] = alleles.alignment_summary_from_counts(actions, fasta)
     else:
@@ -792,10 +827,65 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
         qc["warnings"].append("REF/ALT not aligned to the GRCh38 reference: no FASTA found (run src/reference_data/download_fasta_and_chains.sh)")
     check_output_rows(written, record, qc)
     qc["lambda_gc"] = gwas_stats.lambda_gc(np.frombuffer(lp_values, dtype="float64") if written else np.array([]))
+    header = work / "header.vcf"
+    fields = sample_fields(record, config, qc, decisions["format_keys"])
+    qc["sample_header"] = fields
+    reference = fasta.path.name if fasta is not None else "GRCh38"
+    header.write_text("\n".join(gwas_vcf.table_header(record, decisions["extras"], decisions["format_keys"], fields,
+                                                       reference, qc.get("settings_hash", ""))) + "\n", encoding="utf-8")
     timings["sort_merge_deduplicate"] = time.perf_counter() - started
     started = time.perf_counter()
-    gwas_vcf.bgzip_and_index(plain, vcf_path)
+    gwas_vcf.bgzip_and_index([header, body], vcf_path)
     timings["compress_and_index"] = time.perf_counter() - started
+
+
+def _number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) and number > 0 else None
+
+
+def study_totals(record: dict[str, Any], config: dict[str, Any], has_cases: bool) -> tuple[str, float | None, float | None]:
+    """(StudyType, TotalCases, TotalControls) as gwas2vcf writes them: case-control studies give both totals,
+    continuous traits put the total sample size in TotalControls. Study YAML values win over source metadata."""
+    metadata = record.get("metadata", {}) or {}
+
+    def find(*keys: str) -> float | None:
+        for key in keys:
+            if config.get(key) not in (None, ""):
+                return _number(config.get(key))
+        return _number(recursive_metadata_value(metadata, set(keys)))
+
+    cases, controls = find("ncase", "n_cases"), find("ncontrol", "n_controls")
+    total = find("sample_size")
+    declared = str(config.get("study_type", "") or "").strip().lower().replace("-", "").replace("_", "")
+    case_control = declared == "casecontrol" or (declared != "continuous" and (cases is not None or has_cases))
+    if case_control:
+        return "CaseControl", cases, controls
+    return "Continuous", None, total
+
+
+def sample_fields(record: dict[str, Any], config: dict[str, Any], qc: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    """The ##SAMPLE values: harmonisation counts that add up to TotalVariants, study type and totals, trait metadata."""
+    total, written = int(qc.get("input_rows", 0)), int(qc.get("output_rows", 0))
+    alignment = qc.get("reference_alignment", {}) or {}
+    not_harmonised = int(alignment.get("dropped_mismatch", 0) or 0) + int(qc.get("duplicates_removed", 0))
+    fields: dict[str, Any] = {
+        "TotalVariants": total, "VariantsNotRead": total - written - not_harmonised, "HarmonisedVariants": written,
+        "VariantsNotHarmonised": not_harmonised, "SwitchedAlleles": int(alignment.get("swapped", 0) or 0),
+        "AFFilled": int(qc.get("af_filled_written", 0)),
+    }
+    study_type, cases, controls = study_totals(record, config, "NC" in keys)
+    if controls is not None:
+        fields["TotalControls"] = int(controls) if float(controls).is_integer() else controls
+    if cases is not None:
+        fields["TotalCases"] = int(cases) if float(cases).is_integer() else cases
+    fields["StudyType"] = study_type
+    fields.update({"StudyID": record.get("study_id", ""), "Phenotype": record.get("phenotype", ""),
+                   "Ancestry": record.get("ancestry", ""), "Sex": record.get("sex", ""), "PMID": record.get("PMID", "")})
+    return fields
 
 
 def _merge_counts(a: Any, b: Any) -> Any:
@@ -878,29 +968,58 @@ def run_pieces(pieces: Any, settings: dict[str, Any], lookup: pd.DataFrame, fast
     return results
 
 
+def detect_build_from_head(head: pd.DataFrame, settings: dict[str, Any], lookup: pd.DataFrame, qc: dict[str, Any]) -> str:
+    """The input build, decided once from the first rows of the file (so it does not depend on the piece size)."""
+    config, record = settings["config"], settings["record"]
+    scratch: dict[str, Any] = {"warnings": [], "reference_fills": {}}
+    cols = settings.get("cols") or select_columns(head.drop(columns=[ROW_COLUMN], errors="ignore"), config)
+    out = fill_positions_from_ids(build_canonical(head, cols, config, scratch), scratch)
+    needs = np.isfinite(out["POS"]) & ~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])
+    if not needs.any():
+        return ""
+    build = resolve_input_build(out, record, config, lookup, settings["reference_root"], scratch)
+    qc["build_detection"] = scratch["build_detection"]
+    qc["warnings"].extend(scratch["warnings"])
+    return build
+
+
 def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any], reference_root: str,
-                      analysis_qc: bool, lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any], population: str = "ALL",
+                      lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any], population: str = "ALL", population_used: str = "",
                       workers: int = 1) -> None:
-    sep = normalize_delimiter_value(config.get("delimiter")) or infer_delimiter(raw_path)
-    usecols = candidate_columns(raw_path, sep, config)
-    qc["input_delimiter"] = sep
+    """Standardise a table or a GWAS-VCF (read into the same canonical columns) to GRCh38 GWAS-VCF."""
+    vcf_input = use_vcf_reader(raw_path, config)
     chunk_rows = table_chunk_rows(config)
-    settings = {"config": config, "record": record, "reference_root": reference_root, "analysis_qc": bool(analysis_qc),
-                "population": population}
+    tolerance = float(config.get("palindromic_tolerance", alleles.PALINDROMIC_TOLERANCE))
+    settings = {"config": config, "record": record, "reference_root": reference_root, "population": population,
+                "palindromic_tolerance": tolerance, "afs_label": f"1000G_{population_used or population}"}
+    if vcf_input:
+        header = read_vcf_header(raw_path)
+        config = {**config, "_vcf_header_build": build_from_vcf_header(header)}
+        settings["config"] = config
+        declared = {line.split("ID=", 1)[1].split(",", 1)[0] for line in header if line.startswith("##FORMAT=<ID=")}
+        optional = {column for key, column in VCF_FORMAT_COLUMNS.items() if column in gwas_vcf.OPTIONAL_FORMAT}
+        settings["cols"] = {field: column for field, column in VCF_COLUMNS.items()
+                            if column not in optional or any(VCF_FORMAT_COLUMNS[k] == column for k in declared if k in VCF_FORMAT_COLUMNS)}
+        qc["source_columns"] = {key: f"FORMAT/{fmt}" for fmt, key in VCF_FORMAT_COLUMNS.items()}
+        pieces = read_vcf_pieces(raw_path, chunk_rows, config)
+    else:
+        sep = normalize_delimiter_value(config.get("delimiter")) or infer_delimiter(raw_path)
+        qc["input_delimiter"] = sep
+        pieces = read_pieces(raw_path, sep, candidate_columns(raw_path, sep, config), chunk_rows, config)
+    head_rows = max(BUILD_HEAD_ROWS, chunk_rows or 0) if chunk_rows else None
+    head_pieces = read_vcf_pieces(raw_path, head_rows, config) if vcf_input else \
+        read_pieces(raw_path, qc["input_delimiter"], candidate_columns(raw_path, qc["input_delimiter"], config), head_rows, config)
+    settings["build"] = detect_build_from_head(next(iter(head_pieces)), settings, lookup, qc)
     vcf_path.parent.mkdir(parents=True, exist_ok=True)
     work = make_work_dir()
     try:
         started = time.perf_counter()
-        pieces = read_pieces(raw_path, sep, usecols, chunk_rows, config)
         results = sorted(run_pieces(pieces, settings, lookup, fasta, work, workers), key=lambda r: r["part"])
         wall = {"read_and_standardise_pieces": time.perf_counter() - started}
         qc["table_pieces"] = {"pieces": len(results), "rows_per_piece": chunk_rows or "all", "workers": workers}
         moments = merge_piece_qc(qc, results, record)
-        qc["analysis_qc"] = bool(analysis_qc)
         check_af_concordance(moments, qc)
-        dedup = bool(analysis_qc) and bool(qc.get("analysis_qc_settings", {}).get("deduplicate", True))
-        merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, results[0]["decisions"]["extras"],
-                     dedup, fasta, qc, wall)
+        merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall)
         per_step: dict[str, float] = {}
         for result in results:
             for step, seconds in result["timings"].items():
@@ -909,12 +1028,20 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
                            "piece_steps_summed_over_pieces": {k: round(v, 1) for k, v in per_step.items()}}
     finally:
         shutil.rmtree(work, ignore_errors=True)
-    qc["input_format"] = "table"
+    qc["input_format"] = "gwas_vcf" if vcf_input else "table"
 
 
 # ---------------------------------------------------------------------------------------------------
-# Passthrough path (pre-built GWAS-VCF)
+# GWAS-VCF inputs: read into the table pipeline
 # ---------------------------------------------------------------------------------------------------
+# A GWAS-VCF (e.g. from OpenGWAS) is read record by record into the canonical table columns and then goes
+# through exactly the same steps as a table: build detection from the data, coordinates, alignment, palindromic
+# resolution, deduplication and writing. Multi-allelic records are split into 1 row per ALT allele.
+
+VCF_FORMAT_COLUMNS = {"ES": "BETA", "SE": "SE", "LP": "LOG10P", "AF": "EAF", "SS": "N", "NC": "NCASE", "EZ": "EZ", "SI": "IMPINFO"}
+VCF_COLUMNS = {"CHR": "CHR", "POS": "POS", "SNP": "SNP", "SNPID": "SNPID", "EA": "EA", "OA": "OA", "BETA": "BETA", "SE": "SE",
+               "LOG10P": "LOG10P", "EAF": "EAF", "N": "N", "NCASE": "NCASE", "EZ": "EZ", "IMPINFO": "IMPINFO"}
+
 
 def _open_text(path: Path):
     return gzip.open(path, "rt", encoding="utf-8", errors="replace") if str(path).endswith(".gz") else open(path, "r", encoding="utf-8", errors="replace")
@@ -930,436 +1057,70 @@ def read_vcf_header(path: Path) -> list[str]:
     return header
 
 
-def build_from_header(header: list[str]) -> str:
-    assembly_text = ""
-    contig1_length = None
-    for line in header:
-        if line.startswith("##contig"):
-            match = re.search(r"assembly=([^,>]+)", line, flags=re.I)
-            if match and not assembly_text:
-                assembly_text = match.group(1)
-            length = re.search(r"ID=(?:chr)?1,[^>]*length=(\d+)", line, flags=re.I)
-            if length and contig1_length is None:
-                contig1_length = int(length.group(1))
-        elif line.startswith(("##reference", "##genomeBuild", "##genome_build", "##build", "##assembly")) and not assembly_text:
-            assembly_text = line.split("=", 1)[-1].strip()
-    build = normalize_build_value(assembly_text)
-    if not build:
-        text = assembly_text.lower()
-        build = "hg38" if ("grch38" in text or "hg38" in text or "/b38/" in text) else ("hg19" if ("grch37" in text or "hg19" in text or "b37" in text) else "")
-    if not build and contig1_length:
-        build = {248956422: "hg38", 249250621: "hg19"}.get(contig1_length, "")
-    return {"hg19": "GRCh37", "hg38": "GRCh38"}.get(build, "")
+def use_vcf_reader(raw_path: Path, config: dict[str, Any]) -> bool:
+    declared = str(config.get("format", "") or "").strip().lower()
+    if declared in {"vcf", "gwas_vcf", "gwas-vcf", "gwasvcf"}:
+        return True
+    if declared in {"table", "tsv", "csv", "txt", "text"}:
+        return False
+    return is_gwas_vcf(raw_path)
 
 
-def detect_vcf_build(path: str | Path) -> str:
-    """'GRCh38' / 'GRCh37' from a VCF header, or '' when the header does not say."""
-    try:
-        return build_from_header(read_vcf_header(Path(path)))
-    except OSError:
-        return ""
+def vcf_records_to_table(chunk: pd.DataFrame, sample_column: int) -> pd.DataFrame:
+    """Canonical columns from raw VCF records (columns 0-8 plus the chosen sample), 1 row per ALT allele."""
+    chunk = chunk.reset_index(drop=True)
+    for column in range(9):
+        if column not in chunk.columns:
+            chunk[column] = ""
+    chunk = chunk.fillna("")
+    out = pd.DataFrame({"CHR": chunk[0], "POS": chunk[1], "SNPID": chunk[2], "OA": chunk[3], "EA": chunk[4]})
+    keys = chunk[8].astype(str).to_numpy()
+    values = chunk[sample_column].astype(str).to_numpy() if sample_column in chunk.columns else np.full(len(chunk), "", dtype=object)
+    parsed: dict[str, list[str]] = {name: [""] * len(chunk) for name in VCF_FORMAT_COLUMNS.values()}
+    parsed["FORMAT_ID"] = [""] * len(chunk)
+    for i, (k, v) in enumerate(zip(keys, values)):
+        for key, value in zip(k.split(":"), v.split(":")):
+            if key in VCF_FORMAT_COLUMNS:
+                parsed[VCF_FORMAT_COLUMNS[key]][i] = value
+            elif key == "ID":
+                parsed["FORMAT_ID"][i] = value
+    for name, column in parsed.items():
+        out[name] = column
+    ids = out["SNPID"].astype(str)
+    out["SNP"] = np.where(ids.str.match(r"(?i)^rs\d+$"), ids, out["FORMAT_ID"])
+    out = out.drop(columns=["FORMAT_ID"])
+    multi = out["EA"].astype(str).str.contains(",", regex=False)
+    if multi.any():
+        split = ["EA", *VCF_FORMAT_COLUMNS.values()]
+        for column in split:
+            out[column] = out[column].astype(str).str.split(",")
+        exploded = out[multi].explode(split)
+        out = pd.concat([out[~multi].assign(**{c: out.loc[~multi, c].str[0] for c in split}), exploded])
+        out = out.sort_index(kind="stable").reset_index(drop=True)
+    return out.replace({".": "", "NA": ""})
 
 
-def sample_vcf_records(path: Path, limit: int) -> pd.DataFrame:
-    rows = []
-    with _open_text(path) as handle:
-        for line in handle:
-            if line.startswith("#") or not line.strip():
-                continue
-            fields = line.split("\t", 5)
-            if len(fields) >= 5:
-                rows.append((normalize_chromosome(fields[0]), fields[1], fields[3], fields[4]))
-            if len(rows) >= limit:
-                break
-    return pd.DataFrame(rows, columns=["CHR", "POS", "REF", "ALT"])
-
-
-def resolve_passthrough_build(raw_path: Path, header: list[str], record: dict[str, Any], config: dict[str, Any],
-                              lookup: pd.DataFrame, reference_root: str, qc: dict[str, Any]) -> str:
-    manifest = normalize_build_value(config.get("input_build") or record.get("input_build"))
-    header_build = {"GRCh37": "hg19", "GRCh38": "hg38"}.get(build_from_header(header), "")
-    metadata = declared_build({"metadata": record.get("metadata", {})}, {})[0]
-    declared, source = next(((b, s) for b, s in ((manifest, "manifest_or_yaml"), (header_build, "vcf_header"),
-                                                   (metadata, "source_metadata")) if b), ("", ""))
-    detection: dict[str, Any] = {"build": "", "reason": "reference lookup without alleles"}
-    if alleles.lookup_has_alleles(lookup):
-        sample = sample_vcf_records(raw_path, coords.DETECTION_SAMPLE)
-        lifter, _ = coords.load_liftover(reference_root, "hg38", "hg19")
-        detection = coords.detect_build(sample["CHR"], sample["POS"], sample["ALT"], sample["REF"], lookup, lifter)
-    qc["build_detection"] = {**detection, "declared": declared, "declared_source": source}
-    names = {"hg19": "GRCh37", "hg38": "GRCh38"}
-    if contradicts(declared, detection):
-        raise config_error(
-            f"Row {record.get('study_id')}/{record.get('output_id')}: the source VCF is declared {names[declared]} ({source}) "
-            f"but its positions match {names[detection['build']]}. Correct input_build in the manifest or study YAML."
-        )
-    build = declared or detection.get("build", "")
-    if not build:
-        raise config_error(
-            f"Row {record.get('study_id')}/{record.get('output_id')}: the source VCF does not declare its build and it could not "
-            "be detected. Set input_build (hg19 or hg38) in the manifest or study YAML."
-        )
-    qc["build_detection"].update({"build": build, "method": "declared" if declared else "detected"})
-    return names[build]
-
-
-def sample_size_from_metadata(record: dict[str, Any]) -> int | None:
-    value = recursive_metadata_value(record.get("metadata", {}), {"sample_size"})
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return int(round(number)) if math.isfinite(number) and number > 0 else None
-
-
-def format_integer(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return "."
-    return str(int(math.floor(number + 0.5))) if math.isfinite(number) else "."
-
-
-def _replace_info(info: str, updates: dict[str, str], remove: tuple[str, ...] = ()) -> str:
-    parts = [p for p in info.split(";") if p and p != "." and p.split("=", 1)[0] not in set(updates) | set(remove)]
-    parts.extend(f"{key}={value}" for key, value in updates.items())
-    return ";".join(parts) if parts else "."
-
-
-MANAGED_HEADER = ("##fileformat", "##fileDate", "##contig", "##reference", "##study_id", "##phenotype", "##ancestry",
-                  "##sex", "##PMID", "##source=GWASprocessing", "##GWASprocessing_version", "##INFO=<ID=POS19,")
-
-
-def passthrough_header(header: list[str], record: dict[str, Any], add_ss: bool) -> list[str]:
-    kept = [line for line in header[:-1] if not line.startswith(MANAGED_HEADER)]
-    extra = [gwas_vcf.POS19_INFO]
-    if add_ss:
-        extra.append(gwas_vcf.FORMAT_HEADER[-1])
-    return ["##fileformat=VCFv4.2", f"##fileDate={utc_now()[:10].replace('-', '')}", "##source=GWASprocessing",
-            f"##GWASprocessing_version={OUTPUT_SCHEMA_VERSION}", *gwas_vcf.assembly_header_lines(),
-            *gwas_vcf.metadata_header_lines(record), *kept, *extra, header[-1]]
-
-
-def lift_passthrough_body(raw_path: Path, plain_path: Path, header_lines: list[str], build: str, reference_root: str,
-                          ss_value: int | None, tag_strand: bool, qc: dict[str, Any]) -> int:
-    lifter, reason = coords.load_liftover(reference_root, "hg19", "hg38") if build == "GRCh37" else coords.load_liftover(reference_root, "hg38", "hg19")
-    if build == "GRCh37" and lifter is None:
-        raise config_error(f"Passthrough source is GRCh37 but {reason}. Add hg19ToHg38.over.chain.gz "
-                           "(see src/reference_data/download_fasta_and_chains.sh).")
-    if build == "GRCh38" and lifter is None:
-        qc["warnings"].append(f"{reason}; POS19 left missing")
-    counts = {"malformed_record": 0, "non_primary_chromosome": 0, "bad_position": 0, "minus_strand": 0,
-              "minus_strand_non_snv_dropped": 0}
-    status_counts: dict[str, int] = {}
-    written = rounded = records = 0
-
-    def flush(chunk: list[list[str]], handle) -> None:
-        nonlocal written, rounded
-        if not chunk:
-            return
-        chroms = pd.Series([f[0] for f in chunk])
-        positions = pd.Series([f[1] for f in chunk])
-        result = coords.lift(chroms, positions, lifter) if lifter is not None else None
-        for i, fields in enumerate(chunk):
-            strand = "+"
-            if build == "GRCh37":
-                if result.status[i] != "ok":
-                    continue
-                strand = result.strand[i]
-                original = fields[1]
-                if strand == "-":
-                    if not (fields[3] in COMPLEMENT and fields[4] in COMPLEMENT):
-                        counts["minus_strand_non_snv_dropped"] += 1
-                        continue
-                    fields[3], fields[4] = COMPLEMENT[fields[3]], COMPLEMENT[fields[4]]
-                    counts["minus_strand"] += 1
-                fields[1] = str(int(result.pos[i]))
-                pos19 = original
-            else:
-                pos19 = str(int(result.pos[i])) if result is not None and result.status[i] == "ok" else "."
-                if result is not None and result.status[i] == "ok" and result.strand[i] == "-":
-                    strand = "-"
-            updates = {"POS19": pos19}
-            if tag_strand and strand == "-":
-                updates[STRAND_TAG] = "-"
-            fields[7] = _replace_info(fields[7], updates)
-            if "SS" not in fields[8].split(":"):
-                if ss_value is None:
-                    counts["records_without_ss"] = counts.get("records_without_ss", 0) + 1
-                else:
-                    fields[8] += ":SS"
-                    for j in range(9, len(fields)):
-                        fields[j] += f":{ss_value}"
-                    counts["sample_size_filled_records"] = counts.get("sample_size_filled_records", 0) + 1
-            else:
-                ss_index = fields[8].split(":").index("SS")
-                for j in range(9, len(fields)):
-                    values = fields[j].split(":")
-                    if ss_index < len(values):
-                        normalised = format_integer(values[ss_index])
-                        if normalised not in (".", values[ss_index]):
-                            values[ss_index] = normalised
-                            fields[j] = ":".join(values)
-                            rounded += 1
-            handle.write("\t".join(fields) + "\n")
-            written += 1
-        if result is not None:
-            for key, value in result.counts().items():
-                status_counts[key] = status_counts.get(key, 0) + value
-
-    with _open_text(raw_path) as src, open(plain_path, "w", encoding="utf-8") as handle:
-        handle.write("\n".join(header_lines) + "\n")
-        chunk: list[list[str]] = []
-        for line in src:
-            if line.startswith("#") or not line.strip():
-                continue
-            fields = line.rstrip("\n").split("\t")
-            records += 1
-            if len(fields) < 8:
-                counts["malformed_record"] += 1
-                continue
-            chrom = normalize_chromosome(fields[0])
-            if pd.isna(chrom) or str(chrom) not in PRIMARY_CHROMS:
-                counts["non_primary_chromosome"] += 1
-                continue
-            if not re.fullmatch(r"\d+", fields[1]):
-                counts["bad_position"] += 1
-                continue
-            fields[0] = str(chrom)
-            fields[3], fields[4] = fields[3].upper(), fields[4].upper()
-            chunk.append(fields)
-            if len(chunk) >= 200_000:
-                flush(chunk, handle)
-                chunk = []
-        flush(chunk, handle)
-    key = "hg19_to_hg38" if build == "GRCh37" else "hg38_to_hg19"
-    qc["input_rows"] = records
-    qc["lifted_rows"] = written
-    qc["sample_size_filled_records"] = counts.pop("sample_size_filled_records", 0)
-    missing_ss = counts.pop("records_without_ss", 0)
-    if missing_ss:
-        qc["warnings"].append(f"{missing_ss} records have no FORMAT/SS and the source metadata gives no sample size")
-    qc.setdefault("liftover", {})[key] = {**status_counts, **counts}
-    if rounded:
-        qc["sample_size_values_rounded"] = rounded
-    return written
-
-
-def _flip_number(value: str, how: str) -> str:
-    try:
-        number = float(value)
-    except ValueError:
-        return value
-    if not math.isfinite(number):
-        return value
-    return f"{(-number if how == 'negate' else 1.0 - number):.8g}"
-
-
-PASSTHROUGH_CHUNK = 1_000_000  # records per chunk when rewriting a pre-built VCF (GWAS_PASSTHROUGH_CHUNK overrides)
-
-
-def _format_values(chunk: pd.DataFrame, key: str, sample_column: int = 9) -> np.ndarray:
-    """FORMAT field `key` of one sample column as strings ('' where absent), grouped by FORMAT layout."""
-    values = np.full(len(chunk), "", dtype=object)
-    if sample_column not in chunk.columns:
-        return values
-    for layout in pd.unique(chunk[8]):
-        keys = str(layout).split(":")
-        if key not in keys:
-            continue
-        rows = (chunk[8] == layout).to_numpy()
-        values[rows] = chunk.loc[rows, sample_column].str.split(":").str[keys.index(key)].fillna("").to_numpy(dtype=object)
-    return values
-
-
-def _passthrough_canon(chunk: pd.DataFrame) -> pd.DataFrame:
-    info = chunk[7]
-    canon = pd.DataFrame({
-        "CHR": chunk[0].to_numpy(dtype=object), "POS38": numeric_series(chunk[1]).to_numpy(),
-        "POS19": numeric_series(info.str.extract(r"(?:^|;)POS19=(\d+)", expand=False)).to_numpy(),
-        "SNP": chunk[2].str.extract(r"^(rs\d+)$", flags=re.I, expand=False).str.lower().to_numpy(dtype=object),
-        "EA": chunk[4].to_numpy(dtype=object), "OA": chunk[3].to_numpy(dtype=object),
-        "EAF": numeric_series(pd.Series(_format_values(chunk, "AF"), dtype=object)).to_numpy(),
-        "LIFT_STRAND": np.where(info.str.contains(f"{STRAND_TAG}=-", regex=False).to_numpy(), "-", "+"),
-        "BETA": np.nan,
-    })
-    canon["EAF_SOURCE"] = np.where(np.isfinite(canon["EAF"]), "input", "")
-    return canon
-
-
-def _flip_sample(sample: str, keys: list[str]) -> str:
-    values = sample.split(":")
-    for k, key in enumerate(keys):
-        if k < len(values) and key in ("ES", "EZ"):
-            values[k] = _flip_number(values[k], "negate")
-        elif k < len(values) and key == "AF":
-            values[k] = _flip_number(values[k], "complement")
-    return ":".join(values)
-
-
-def _apply_alignment(chunk: pd.DataFrame, action: np.ndarray, ea: np.ndarray, oa: np.ndarray) -> None:
-    """Rewrite REF/ALT, and for swapped records ES/EZ/AF (all samples) and INFO/AF, in place."""
-    complement = np.isin(action, ["complement", "complement_swap"])
-    if complement.any():
-        ea[complement] = complement_alleles(pd.Series(ea[complement], dtype=object)).to_numpy(dtype=object)
-        oa[complement] = complement_alleles(pd.Series(oa[complement], dtype=object)).to_numpy(dtype=object)
-    swap = np.isin(action, ["swap", "complement_swap"])
-    ref, alt = np.where(swap, ea, oa), np.where(swap, oa, ea)
-    chunk[3], chunk[4] = ref, alt
-    for i in np.where(swap)[0]:
-        keys = str(chunk.iat[i, 8]).split(":")
-        for column in range(9, chunk.shape[1]):
-            chunk.iat[i, column] = _flip_sample(str(chunk.iat[i, column]), keys)
-        chunk.iat[i, 7] = ";".join(f"AF={_flip_number(p[3:], 'complement')}" if p.startswith("AF=") else p
-                                   for p in str(chunk.iat[i, 7]).split(";"))
-
-
-def _has_body(plain_path: Path, header_count: int) -> str:
-    """First data line after the header ('' when the file has no records)."""
-    with open(plain_path, "r", encoding="utf-8") as handle:
-        return next((line for i, line in enumerate(handle) if i >= header_count and line.strip()), "")
-
-
-def _add_counts(total: dict[str, int], part: dict[str, Any]) -> None:
-    for key, value in part.items():
-        if isinstance(value, (int, np.integer)):
-            total[key] = total.get(key, 0) + int(value)
-
-
-def rewrite_passthrough_body(plain_path: Path, final_path: Path, header_count: int, config: dict[str, Any], analysis_qc: bool,
-                             lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any]) -> int:
-    """Analysis QC and GRCh38 alignment over the lifted, sorted body, chunk by chunk (bounded memory).
-
-    The body is sorted by position, so duplicates can only span a chunk boundary at the boundary position;
-    the keys kept at the previous chunk's last position are carried forward to catch them.
-    """
-    chunk_size = int(os.environ.get("GWAS_PASSTHROUGH_CHUNK", PASSTHROUGH_CHUNK))
-    removed: dict[str, int] = {}
-    palindromic: dict[str, int] = {}
-    maf_detail: dict[str, int] = {}
-    actions: dict[str, int] = {}
-    lp_parts: list[np.ndarray] = []
-    carry: set[tuple[int, str, str]] = set()
-    written = 0
-    dedup = analysis_qc and {**alleles.ANALYSIS_QC_DEFAULTS, **(config.get("analysis_qc") or {})}.get("deduplicate", True)
-    with open(plain_path, "r", encoding="utf-8") as src:
-        header = [next(src).rstrip("\n") for _ in range(header_count)]
-    if not _has_body(plain_path, header_count):
-        return 0
-    with open(final_path, "w", encoding="utf-8") as out:
-        out.write("\n".join(header) + "\n")
-        reader = pd.read_csv(plain_path, sep="\t", header=None, skiprows=header_count, dtype=str, na_filter=False,
-                             quoting=csv.QUOTE_NONE, chunksize=chunk_size)
-        for chunk in reader:
-            chunk = chunk.reset_index(drop=True)
-            canon = _passthrough_canon(chunk)
-            keep = np.ones(len(chunk), dtype=bool)
-            ea, oa = canon["EA"].to_numpy(dtype=object).copy(), canon["OA"].to_numpy(dtype=object).copy()
-            if analysis_qc:
-                chunk_qc: dict[str, Any] = {}
-                kept = alleles.apply_analysis_qc(alleles.annotate_with_reference(canon, lookup), config.get("analysis_qc"), chunk_qc)
-                keep[:] = False
-                keep[kept.index.to_numpy()] = True
-                ea[kept.index.to_numpy()] = kept["EA"].to_numpy(dtype=object)
-                oa[kept.index.to_numpy()] = kept["OA"].to_numpy(dtype=object)
-                _add_counts(removed, chunk_qc["qc_removed"])
-                _add_counts(palindromic, chunk_qc.get("palindromic_resolution", {}))
-                _add_counts(maf_detail, chunk_qc.get("maf_detail", {}))
-                qc["analysis_qc_settings"] = chunk_qc["analysis_qc_settings"]
-                if dedup:
-                    key = coords.position_key(canon["CHR"], canon["POS38"])
-                    low = np.where(ea <= oa, ea, oa)
-                    high = np.where(ea <= oa, oa, ea)
-                    crossing = keep & np.array([(int(k), str(lo), str(hi)) in carry for k, lo, hi in zip(key, low, high)], dtype=bool)
-                    keep &= ~crossing
-                    removed["duplicate"] = removed.get("duplicate", 0) + int(crossing.sum())
-                    if keep.any():
-                        last = key[keep].max()
-                        carry = {(int(k), str(lo), str(hi)) for k, lo, hi, kp in zip(key, low, high, keep) if kp and k == last}
-            action = np.full(len(chunk), "keep", dtype=object)
-            if fasta is not None and keep.any():
-                rows = np.where(keep)[0]
-                action[rows] = alleles.reference_alignment(canon["CHR"].iloc[rows], canon["POS38"].iloc[rows], pd.Series(ea[rows]),
-                                                           pd.Series(oa[rows]), fasta)["action"].to_numpy()
-                _add_counts(actions, {str(k): int(v) for k, v in zip(*np.unique(action[rows], return_counts=True))})
-            _apply_alignment(chunk, action, ea, oa)
-            chunk[7] = chunk[7].str.replace(f";{STRAND_TAG}=-", "", regex=False)
-            final = keep & (action != "drop")
-            selected = chunk[final]
-            if len(selected):
-                columns = [selected[c].astype(str) for c in selected.columns]
-                out.write("\n".join(columns[0].str.cat(columns[1:], sep="\t").tolist()) + "\n")
-                lp_parts.append(numeric_series(pd.Series(_format_values(selected.reset_index(drop=True), "LP"), dtype=object)).to_numpy())
-            written += int(final.sum())
-    if analysis_qc:
-        qc["qc_removed"] = removed
-        qc["palindromic_resolution"] = palindromic
-        if maf_detail:
-            qc["maf_detail"] = maf_detail
-    if fasta is not None:
-        expanded = np.concatenate([np.full(v, k, dtype=object) for k, v in actions.items()]) if actions else np.array([], dtype=object)
-        qc["reference_alignment"] = alleles.alignment_summary(expanded, fasta)
-    else:
-        qc["reference_alignment"] = {"performed": False, "reason": "no GRCh38 FASTA under <reference_root>/genome"}
-        qc["warnings"].append("REF/ALT not re-checked against the GRCh38 reference: no FASTA found")
-    qc["lambda_gc"] = gwas_stats.lambda_gc(np.concatenate(lp_parts) if lp_parts else np.array([]))
-    return written
-
-
-def scan_passthrough_body(plain_path: Path, header_count: int, qc: dict[str, Any]) -> int:
-    """Count records and compute lambda GC without rewriting (nothing to change)."""
-    lp_parts: list[np.ndarray] = []
-    count = 0
-    first = _has_body(plain_path, header_count)
-    if not first:
-        return 0
-    usecols = [8, 9] if first.count("\t") >= 9 else [8]
-    reader = pd.read_csv(plain_path, sep="\t", header=None, skiprows=header_count, dtype=str, na_filter=False,
-                         quoting=csv.QUOTE_NONE, usecols=usecols, chunksize=int(os.environ.get("GWAS_PASSTHROUGH_CHUNK", PASSTHROUGH_CHUNK)))
-    for chunk in reader:
-        chunk = chunk.reset_index(drop=True)
-        count += len(chunk)
-        lp_parts.append(numeric_series(pd.Series(_format_values(chunk, "LP"), dtype=object)).to_numpy())
-    qc["lambda_gc"] = gwas_stats.lambda_gc(np.concatenate(lp_parts) if lp_parts else np.array([]))
-    qc["reference_alignment"] = {"performed": False, "reason": "no GRCh38 FASTA under <reference_root>/genome"}
-    qc["warnings"].append("REF/ALT not re-checked against the GRCh38 reference: no FASTA found")
-    return count
-
-
-def standardise_existing_vcf(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any], reference_root: str,
-                             analysis_qc: bool, lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any]) -> None:
+def read_vcf_pieces(raw_path: Path, chunk_rows: int | None, config: dict[str, Any]):
+    """Yield a GWAS-VCF in pieces of canonical columns, with ROW_COLUMN numbering the input records."""
     header = read_vcf_header(raw_path)
     if not header or not header[-1].startswith("#CHROM"):
         raise data_error(f"{raw_path} has no #CHROM header line; it is not a VCF")
-    build = resolve_passthrough_build(raw_path, header, record, config, lookup, reference_root, qc)
-    qc["source_build"] = build
-    format_line_has_ss = any(line.startswith("##FORMAT=<ID=SS,") for line in header)
-    # Headers can declare SS while records omit it (OpenGWAS), so the fill is decided per record.
-    ss_value = sample_size_from_metadata(record)
-    new_header = passthrough_header(header, record, add_ss=ss_value is not None and not format_line_has_ss)
-    vcf_path.parent.mkdir(parents=True, exist_ok=True)
-    work = make_work_dir()
-    try:
-        plain = work / "lifted.vcf"
-        lift_passthrough_body(raw_path, plain, new_header, build, reference_root, ss_value, analysis_qc, qc)
-        qc["sample_size_source"] = "gwasinfo" if qc["sample_size_filled_records"] else ("source" if format_line_has_ss else "missing")
-        gwas_vcf.sort_vcf_body(plain)
-        qc["analysis_qc"] = bool(analysis_qc)
-        if analysis_qc or fasta is not None:
-            final = work / "final.vcf"
-            written = rewrite_passthrough_body(plain, final, len(new_header), config, analysis_qc, lookup, fasta, qc)
-        else:
-            final = plain
-            written = scan_passthrough_body(plain, len(new_header), qc)
-        if written == 0:
-            raise data_error(f"No variants remain for {record.get('study_id')}/{record.get('output_id')} after lifting the "
-                             f"source VCF to GRCh38 (liftover: {qc.get('liftover')}).")
-        qc["output_rows"] = written
-        gwas_vcf.bgzip_and_index(final, vcf_path)
-    finally:
-        shutil.rmtree(work, ignore_errors=True)
-    qc["input_format"] = "gwas_vcf"
-    qc["metadata_headers_normalised"] = True
+    samples = header[-1].split("\t")[9:]
+    wanted = str(config.get("sample", "") or "")
+    sample_column = 9 + (samples.index(wanted) if wanted in samples else 0)
+    offset = 0
+    reader = pd.read_csv(raw_path, sep="\t", header=None, skiprows=len(header), dtype=str, na_filter=False,
+                         quoting=csv.QUOTE_NONE, chunksize=chunk_rows or TABLE_CHUNK, comment=None)
+    yielded = False
+    for chunk in reader:
+        piece = vcf_records_to_table(chunk, sample_column)
+        piece[ROW_COLUMN] = np.arange(offset, offset + len(piece), dtype="int64")
+        offset += len(piece)
+        yielded = True
+        yield piece
+    if not yielded:
+        empty = pd.DataFrame(columns=[*VCF_COLUMNS.values(), ROW_COLUMN])
+        yield empty
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1377,15 +1138,6 @@ def provenance() -> dict[str, Any]:
     return info
 
 
-def use_passthrough(raw_path: Path, config: dict[str, Any]) -> bool:
-    declared = str(config.get("format", "") or "").strip().lower()
-    if declared in {"vcf", "gwas_vcf", "gwas-vcf", "gwasvcf"}:
-        return True
-    if declared in {"table", "tsv", "csv", "txt", "text"}:
-        return False
-    return is_gwas_vcf(raw_path)
-
-
 def build_record(record: dict[str, Any], vcf: Path, index: Path, metadata: Path, qc_json: Path, plot: Path, qc: dict[str, Any]) -> dict[str, Any]:
     out = dict(record)
     out.update({"standard_vcf": str(vcf), "standard_index": str(index), "metadata_json": str(metadata), "qc_json": str(qc_json),
@@ -1401,7 +1153,6 @@ def main() -> None:
     parser.add_argument("--reference-root", required=True)
     parser.add_argument("--force", default="false")
     parser.add_argument("--dry-run", default="false")
-    parser.add_argument("--analysis-qc", default="false")
     parser.add_argument("--workers", type=int, default=int(os.environ.get("GWAS_WORKERS", "1") or 1),
                         help="processes standardising pieces of a table in parallel (each holds its own reference lookup)")
     parser.add_argument("--output", required=True)
@@ -1417,9 +1168,9 @@ def main() -> None:
     metadata_json = output_prefix.with_suffix(".metadata.json")
     qc_json = output_prefix.with_suffix(".qc.json")
     plot = output_prefix.with_suffix(".tiff")
-    force, dry_run, analysis_qc = parse_bool(args.force), parse_bool(args.dry_run), parse_bool(args.analysis_qc)
+    force, dry_run = parse_bool(args.force), parse_bool(args.dry_run)
     config = resolve_row_config(args.config_root, record, args.study_yaml)
-    fingerprint = settings_fingerprint(manifest_values, config, analysis_qc, args.reference_root)
+    fingerprint = settings_fingerprint(manifest_values, config, args.reference_root)
 
     if dry_run:
         write_json(args.output, build_record(record, standard_vcf, standard_index, metadata_json, qc_json, plot,
@@ -1433,7 +1184,6 @@ def main() -> None:
             write_json(args.output, result)
             return
     qc_json.unlink(missing_ok=True)  # a failed regeneration must not look complete
-    output_prefix.with_suffix(".steps.txt").unlink(missing_ok=True)
 
     gwas_vcf.require_htslib()
     raw_path = Path(record["raw_path"])
@@ -1455,17 +1205,12 @@ def main() -> None:
         qc["warnings"].append("reference lookup lacks A1/A2/AF1; rebuild it with make_1000genomes_lookup_tables.py")
     fasta = alleles.Fasta.find(args.reference_root)
 
-    if use_passthrough(raw_path, config):
-        standardise_existing_vcf(raw_path, standard_vcf, record, config, args.reference_root, analysis_qc, lookup, fasta, qc)
-    else:
-        standardise_table(raw_path, standard_vcf, record, config, args.reference_root, analysis_qc, lookup, fasta, qc,
-                          population=population, workers=max(1, args.workers))
+    standardise_table(raw_path, standard_vcf, record, config, args.reference_root, lookup, fasta, qc,
+                      population=population, population_used=used or population, workers=max(1, args.workers))
     qc["coordinate_build"] = "GRCh38"
     qc["completed_at"] = utc_now()
     qc["steps"] = gwas_steps.build_steps(qc)
-    steps_log = output_prefix.with_suffix(".steps.txt")
-    steps_log.write_text(gwas_steps.format_steps(qc, record), encoding="utf-8")
-    print(steps_log.read_text(encoding="utf-8"), file=sys.stderr)
+    print(gwas_steps.format_steps(qc, record), file=sys.stderr)
     metadata = {
         "study_id": record["study_id"], "output_id": record["output_id"], "phenotype": record["phenotype"],
         "ancestry": record["ancestry"], "sex": record.get("sex", ""), "author": record["author"], "year": record["year"],
@@ -1475,8 +1220,7 @@ def main() -> None:
     }
     write_json(metadata_json, metadata)
     write_json(qc_json, qc)
-    write_json(args.output, {**build_record(record, standard_vcf, standard_index, metadata_json, qc_json, plot, qc),
-                             "steps_log": str(steps_log)})
+    write_json(args.output, build_record(record, standard_vcf, standard_index, metadata_json, qc_json, plot, qc))
 
 
 if __name__ == "__main__":

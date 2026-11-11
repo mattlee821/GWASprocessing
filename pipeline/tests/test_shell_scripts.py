@@ -101,10 +101,9 @@ class WrapperTests(unittest.TestCase):
 
     def test_options_reach_nextflow_with_lowercase_booleans_and_local_defaults(self):
         repo = fake_repo(self.tmp)
-        proc = self.run_wrapper(repo, "--qcplot", "False", "--analysis-qc", "TRUE")
+        proc = self.run_wrapper(repo, "--qcplot", "False")
         self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.assertEqual((self.value("--qcplot"), self.value("--analysis_qc"), self.value("-profile"), self.value("--row_limit")),
-                         ("false", "true", "local", "1"))
+        self.assertEqual((self.value("--qcplot"), self.value("-profile"), self.value("--row_limit")), ("false", "local", "1"))
         self.assertEqual(self.value("run"), str(repo / "pipeline" / "main.nf"))
 
     def test_environment_values_override_dotenv_defaults(self):

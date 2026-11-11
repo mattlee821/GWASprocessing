@@ -35,17 +35,8 @@ PREPARED_COLUMNS = ["CHR", "RS", "POS19", "A1", "A2", "AF1", "KEY"]  # compact i
 LOOKUP_CHUNK = 2_000_000
 REFERENCE_ANNOTATION = ["REF_SNP", "REF_A1", "REF_A2", "REF_AF1"]
 
-# Analysis-QC defaults. The stage is opt-in (default off); a study YAML `analysis_qc` block can toggle
-# filters and override thresholds. `palindromic_tolerance` matches TwoSampleMR's harmonise tolerance.
-ANALYSIS_QC_DEFAULTS = {
-    "biallelic_snp": True,
-    "remove_palindromic": True,
-    "maf": True,
-    "maf_threshold": 0.01,
-    "deduplicate": True,
-    "resolve_palindromic_strand": True,
-    "palindromic_tolerance": 0.08,
-}
+# Palindromic (A/T, C/G) SNPs are resolved by allele frequency with TwoSampleMR's harmonise tolerance.
+PALINDROMIC_TOLERANCE = 0.08
 _ACGT = re.compile(r"^[ACGT]+$")
 
 
@@ -256,46 +247,41 @@ def fill_eaf_from_reference(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
 # Analysis QC
 # ---------------------------------------------------------------------------------------------------
 
-def resolve_palindromic_strand(frame: pd.DataFrame, settings: dict[str, Any], qc: dict[str, Any]) -> tuple[pd.DataFrame, int]:
+def resolve_palindromic_strand(frame: pd.DataFrame, qc: dict[str, Any], tolerance: float = PALINDROMIC_TOLERANCE) -> pd.DataFrame:
     """TwoSampleMR action=2 style strand inference for A/T and C/G SNPs, using study-reported EAF only.
 
-    Kept when study and reference frequencies of the effect allele fall on the same side of 0.5,
-    complemented when they fall on opposite sides, dropped when either is within the tolerance of 0.5,
-    when there is no allele-matched reference, or when the EAF was not reported by the study.
-    """
+    Adds PAL: '' for non-palindromic rows; 'forward' when study and reference frequencies of the effect allele
+    fall on the same side of 0.5; 'complemented' (alleles complemented) when they fall on opposite sides;
+    'ambiguous' when either frequency is within the tolerance of 0.5, there is no allele-matched reference,
+    or the study reported no EAF. Nothing is removed: ambiguous SNPs are kept and marked (INFO/HM)."""
     out = frame.copy()
+    out["PAL"] = ""
     pal = is_palindromic(out["EA"], out["OA"])
-    detail = {"palindromic_total": int(pal.sum()), "kept_same_strand": 0, "flipped": 0, "dropped_ambiguous": 0,
-              "dropped_no_reference": 0, "dropped_no_study_eaf": 0, "dropped_resolution_disabled": 0}
-    if not pal.any():
-        qc["palindromic_resolution"] = detail
-        return out, 0
-    if not settings.get("resolve_palindromic_strand", True):
-        detail["dropped_resolution_disabled"] = int(pal.sum())
-        qc["palindromic_resolution"] = detail
-        return out[~pal], int(pal.sum())
-
-    tolerance = float(settings.get("palindromic_tolerance", 0.08))
-    low, high = 0.5 - tolerance, 0.5 + tolerance
-    ref_af = reference_af_of_effect_allele(out)
-    eaf = numeric_series(out["EAF"]).to_numpy(dtype="float64")
-    study = (eaf_source(out) == "input") & np.isfinite(eaf)
-    no_reference = pal & ~np.isfinite(ref_af)
-    no_study = pal & np.isfinite(ref_af) & ~study
-    usable = pal & np.isfinite(ref_af) & study
-    ambiguous = usable & (((eaf > low) & (eaf < high)) | ((ref_af > low) & (ref_af < high)))
-    resolvable = usable & ~ambiguous
-    opposite = ((eaf < 0.5) & (ref_af > 0.5)) | ((eaf > 0.5) & (ref_af < 0.5))
-    flip = resolvable & opposite
-    if flip.any():
-        out.loc[flip, "EA"] = complement_alleles(out.loc[flip, "EA"]).to_numpy()
-        out.loc[flip, "OA"] = complement_alleles(out.loc[flip, "OA"]).to_numpy()
-    drop = pal & ~resolvable
-    detail.update({"kept_same_strand": int((resolvable & ~flip).sum()), "flipped": int(flip.sum()),
-                   "dropped_ambiguous": int(ambiguous.sum()), "dropped_no_reference": int(no_reference.sum()),
-                   "dropped_no_study_eaf": int(no_study.sum())})
+    detail = {"palindromic_total": int(pal.sum()), "kept_same_strand": 0, "flipped": 0, "ambiguous_frequency_near_half": 0,
+              "ambiguous_no_reference": 0, "ambiguous_no_study_eaf": 0}
+    if pal.any():
+        low, high = 0.5 - tolerance, 0.5 + tolerance
+        ref_af = reference_af_of_effect_allele(out)
+        eaf = numeric_series(out["EAF"]).to_numpy(dtype="float64")
+        study = (eaf_source(out) == "input") & np.isfinite(eaf)
+        no_reference = pal & ~np.isfinite(ref_af)
+        no_study = pal & np.isfinite(ref_af) & ~study
+        usable = pal & np.isfinite(ref_af) & study
+        near_half = usable & (((eaf > low) & (eaf < high)) | ((ref_af > low) & (ref_af < high)))
+        resolvable = usable & ~near_half
+        opposite = ((eaf < 0.5) & (ref_af > 0.5)) | ((eaf > 0.5) & (ref_af < 0.5))
+        flip = resolvable & opposite
+        if flip.any():
+            out.loc[flip, "EA"] = complement_alleles(out.loc[flip, "EA"]).to_numpy()
+            out.loc[flip, "OA"] = complement_alleles(out.loc[flip, "OA"]).to_numpy()
+        out.loc[resolvable & ~flip, "PAL"] = "forward"
+        out.loc[flip, "PAL"] = "complemented"
+        out.loc[pal & ~resolvable, "PAL"] = "ambiguous"
+        detail.update({"kept_same_strand": int((resolvable & ~flip).sum()), "flipped": int(flip.sum()),
+                       "ambiguous_frequency_near_half": int(near_half.sum()), "ambiguous_no_reference": int(no_reference.sum()),
+                       "ambiguous_no_study_eaf": int(no_study.sum())})
     qc["palindromic_resolution"] = detail
-    return out[~drop], int(drop.sum())
+    return out
 
 
 def deduplicate(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
@@ -311,47 +297,6 @@ def dedup_alleles(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     ea, oa = upper_alleles(frame["EA"]).to_numpy(), upper_alleles(frame["OA"]).to_numpy()
     first = ea <= oa
     return np.where(first, ea, oa), np.where(first, oa, ea)
-
-
-def apply_analysis_qc(frame: pd.DataFrame, config_settings: dict[str, Any] | None, qc: dict[str, Any],
-                      deduplicate_rows: bool = True) -> pd.DataFrame:
-    """Analysis filters in order: biallelic SNPs, MAF, palindromic strand resolution, deduplication.
-
-    MAF runs before the palindromic check so that rare palindromic SNPs are counted as rare (the lookup holds
-    only SNPs with MAF >= 0.01, so they would otherwise be counted as palindromes without a reference). The
-    filters are independent row by row, so the order changes only which filter a row is counted against.
-
-    With deduplicate_rows=False the duplicate count is 0 and the caller deduplicates (pieces of a table
-    are deduplicated together after they are merged).
-    """
-    settings = {**ANALYSIS_QC_DEFAULTS, **(config_settings or {})}
-    removed: dict[str, int] = {}
-    out = frame
-    if settings.get("biallelic_snp", True):
-        ea, oa = upper_alleles(out["EA"]), upper_alleles(out["OA"])
-        keep = (ea.isin(list("ACGT")) & oa.isin(list("ACGT")) & (ea != oa)).to_numpy()
-        removed["non_biallelic"] = int((~keep).sum())
-        out = out[keep]
-    if settings.get("maf", True):
-        threshold = float(settings.get("maf_threshold", 0.01))
-        eaf = numeric_series(out["EAF"]).to_numpy(dtype="float64")
-        maf = np.minimum(eaf, 1.0 - eaf)
-        valid = np.isfinite(eaf) & (eaf >= 0) & (eaf <= 1)
-        keep = valid & (maf >= threshold)
-        removed[f"maf_below_{threshold}"] = int((~keep).sum())
-        qc["maf_detail"] = {"below_threshold": int((valid & ~keep).sum()), "no_valid_frequency": int((~valid).sum())}
-        out = out[keep]
-    if settings.get("remove_palindromic", True):
-        out, dropped = resolve_palindromic_strand(out, settings, qc)
-        removed["palindromic"] = dropped
-    if settings.get("deduplicate", True):
-        if deduplicate_rows:
-            out, removed["duplicate"] = deduplicate(out)
-        else:
-            removed["duplicate"] = 0
-    qc["qc_removed"] = removed
-    qc["analysis_qc_settings"] = settings
-    return out
 
 
 def af_moments(frame: pd.DataFrame) -> dict[str, float]:
@@ -576,4 +521,6 @@ def orient_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame
         out.loc[swap, "OA"] = ea_before
         out.loc[swap, "BETA"] = -numeric_series(out.loc[swap, "BETA"])
         out.loc[swap, "EAF"] = 1.0 - numeric_series(out.loc[swap, "EAF"])
+        if "EZ" in out.columns:
+            out.loc[swap, "EZ"] = -numeric_series(out.loc[swap, "EZ"])
     return out, action

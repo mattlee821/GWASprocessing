@@ -26,7 +26,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = result.rows
         self.assertEqual([r["ID"] for r in rows], ["rs3", "."])
-        self.assertEqual((rows[0]["FORMAT"]["AF"], rows[0]["INFO"]["EAF_SOURCE"]), ("0.33", "reference"))
+        self.assertEqual((rows[0]["FORMAT"]["AF"], rows[0]["FORMAT"]["AFS"][:6]), ("0.33", "1000G_"))
         self.assertEqual(rows[1]["FORMAT"]["AF"], ".")
         self.assertEqual((result.qc["reference_fills"]["rsid"], result.qc["reference_fills"]["EAF"]), (1, 1))
 
@@ -39,10 +39,10 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual((result.qc["reference_fills"]["CHR"], result.qc["reference_fills"]["POS19"]), (2, 2))
         self.assertEqual(result.qc["coordinate_source"], "population_lookup")
         self.assertEqual((result.metadata["sex"], result.metadata["coordinate_build"]), ("female", "GRCh38"))
-        self.assertIn("##sex=female", result.header)
+        self.assertEqual(result.sample["Sex"], "female")
         self.assertIn("##reference=GRCh38", result.header)
         rs1 = result.by_id()["rs1"]
-        self.assertEqual((rs1["CHROM"], rs1["POS"], rs1["REF"], rs1["ALT"], rs1["INFO"]["POS19"]), ("1", 1100, "G", "A", "1000"))
+        self.assertEqual((rs1["CHROM"], rs1["POS"], rs1["REF"], rs1["ALT"]), ("1", 1100, "G", "A"))
 
     def test_plink_table_derives_other_allele_from_ref_and_alt(self):
         result = run_standardise(self.tmp, EXAMPLES / "tables/zhang_plink.tsv", EXAMPLES / "reference",
@@ -61,19 +61,20 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual(result.returncode, 78)
         self.assertIn("ancestry", result.stderr.lower())
 
-    def test_analysis_qc_filters_are_opt_in(self):
+    def test_standard_steps_keep_rare_variants_and_indels_and_remove_only_duplicates(self):
         raw = write_table(self.tmp / "qc.tsv", ["CHR", "POS38", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P", "N"], [
             [1, 1000, "rs1", "A", "G", 0.30, 0.1, 0.01, 0.2, 1000],
             [1, 2000, "rs2", "AT", "G", 0.30, 0.1, 0.01, 0.2, 1000],
             [1, 3000, "rs3", "A", "T", 0.30, 0.1, 0.01, 0.2, 1000],
             [1, 4000, "rs4", "A", "G", 0.005, 0.1, 0.01, 0.2, 1000],
             [1, 1000, "rs5", "A", "G", 0.30, 0.1, 0.01, 0.2, 1000],
+            [1, 5000, "rs6", "D", "I", 0.30, 0.1, 0.01, 0.2, 1000],
         ])
-        off = run_standardise(self.tmp, raw, EXAMPLES / "reference", name="off")
-        self.assertEqual(len(off.rows), 5)
-        on = run_standardise(self.tmp, raw, EXAMPLES / "reference", analysis_qc=True, name="on")
-        self.assertEqual([r["ID"] for r in on.rows], ["rs1"])
-        self.assertEqual(on.qc["qc_removed"], {"non_biallelic": 1, "palindromic": 1, "maf_below_0.01": 1, "duplicate": 1})
+        result = run_standardise(self.tmp, raw, EXAMPLES / "reference")
+        self.assertEqual(sorted(r["ID"] for r in result.rows), ["rs1", "rs2", "rs3", "rs4"])
+        self.assertEqual(result.qc["duplicates_removed"], 1)
+        self.assertEqual(result.qc["incomplete_by_cause"]["invalid_allele"]["rows"], 1)
+        self.assertTrue(result.by_id()["rs3"]["INFO"]["HM"].startswith("palindrome_"))
 
 
 class ReviewRegressionTests(unittest.TestCase):
@@ -88,24 +89,27 @@ class ReviewRegressionTests(unittest.TestCase):
                                                           [1, 3100, "rs31", "C", "T", 0.4, 0.05, 0.01, 0.2, 5000]])
         result = run_standardise(self.tmp, raw, self.reference([]), input_build="hg19")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.by_id()["rs30"]["FORMAT"], {"ES": "0.1", "SE": "0.02", "LP": "6", "AF": ".", "SS": "5000"})
+        self.assertEqual(result.by_id()["rs30"]["FORMAT"], {"ES": "0.1", "SE": "0.02", "LP": "6", "AF": ".", "AFS": ".", "SS": "5000",
+                                                          "ID": "rs30"})
 
     def test_filled_frequency_is_that_of_the_effect_allele(self):
         ref = self.reference([("1", "rs10", 1000, "A", "G", 0.8), ("1", "rs11", 1100, "A", "G", 0.2)])
         raw = write_table(self.tmp / "gwas.tsv", ["CHR", "POS", "SNP", "EA", "OA", "BETA", "SE", "P", "N"],
                           [[1, 1000, "rs10", "A", "G", 0.1, 0.02, 1e-6, 5000], [1, 1100, "rs11", "G", "A", 0.1, 0.02, 1e-6, 5000]])
         rows = run_standardise(self.tmp, raw, ref, input_build="hg19").by_id()
-        self.assertEqual((rows["rs10"]["FORMAT"]["AF"], rows["rs10"]["INFO"]["EAF_SOURCE"]), ("0.8", "reference"))
+        self.assertEqual((rows["rs10"]["FORMAT"]["AF"], rows["rs10"]["FORMAT"]["AFS"][:6]), ("0.8", "1000G_"))
         self.assertEqual(rows["rs11"]["FORMAT"]["AF"], "0.8")
 
-    def test_palindrome_with_reference_filled_frequency_is_dropped_not_flipped(self):
+    def test_palindrome_with_reference_filled_frequency_is_kept_ambiguous_not_flipped(self):
         ref = self.reference([("1", "rs20", 2000, "A", "T", 0.8), ("1", "rs21", 2100, "A", "G", 0.3)])
         raw = write_table(self.tmp / "gwas.tsv", ["CHR", "POS", "SNP", "EA", "OA", "BETA", "SE", "P", "N"],
                           [[1, 2000, "rs20", "A", "T", 0.1, 0.02, 1e-6, 5000], [1, 2100, "rs21", "A", "G", 0.1, 0.02, 1e-6, 5000]])
-        result = run_standardise(self.tmp, raw, ref, analysis_qc=True, input_build="hg19")
-        self.assertEqual(list(result.by_id()), ["rs21"])
+        result = run_standardise(self.tmp, raw, ref, input_build="hg19")
+        self.assertEqual(list(result.by_id()), ["rs20", "rs21"])
+        self.assertTrue(result.by_id()["rs20"]["INFO"]["HM"].startswith("palindrome_ambiguous"))
+        self.assertEqual(result.by_id()["rs20"]["FORMAT"]["AFS"][:6], "1000G_")
         detail = result.qc["palindromic_resolution"]
-        self.assertEqual((detail["dropped_no_study_eaf"], detail["flipped"]), (1, 0))
+        self.assertEqual((detail["ambiguous_no_study_eaf"], detail["flipped"]), (1, 0))
 
     def detection_reference(self):
         return self.reference([("1", f"rs6{i:02d}", 6000 + 1000 * i, "A", "G", 0.3) for i in range(30)])
@@ -120,18 +124,19 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual((result.qc["build_detection"]["build"], result.qc["build_detection"]["method"]), ("hg19", "detected"))
         first = result.rows[0]
-        self.assertEqual((first["POS"], first["INFO"]["POS19"], first["ID"]), (6100, "6000", "rs600"))
+        self.assertEqual((first["POS"], first["ID"]), (6100, "rs600"))
 
     def test_build_that_cannot_be_determined_fails_loudly(self):
         result = run_standardise(self.tmp, self.detection_table([123_457 + 7 * i for i in range(30)]), self.detection_reference())
         self.assertEqual(result.returncode, 78)
         self.assertIn("input_build", result.stderr)
 
-    def test_declared_build_contradicted_by_the_data_fails_loudly(self):
+    def test_build_detected_from_the_data_wins_over_a_contradicting_declaration(self):
         result = run_standardise(self.tmp, self.detection_table([6000 + 1000 * i for i in range(30)]), self.detection_reference(),
                                  input_build="hg38")
-        self.assertEqual(result.returncode, 78)
-        self.assertIn("GRCh37", result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((result.qc["build_detection"]["build"], result.qc["build_detection"]["method"]), ("hg19", "detected"))
+        self.assertTrue(any("disagrees" in w for w in result.qc["warnings"]))
 
     def test_grch38_chr_pos_ids_never_borrow_grch37_annotations(self):
         # 30 genuine GRCh38 variants plus 3 whose GRCh38 position coincides with an unrelated GRCh37 variant.
@@ -142,8 +147,8 @@ class ReviewRegressionTests(unittest.TestCase):
         result = run_standardise(self.tmp, self.detection_table(positions, ids=[f"1:{p}" for p in positions]), ref, input_build="hg38")
         self.assertEqual(result.returncode, 0, result.stderr)
         by_pos = {r["POS"]: r for r in result.rows}
-        self.assertEqual((by_pos[200000]["ID"], by_pos[200000]["INFO"]["POS19"]), (".", "199900"))
-        self.assertEqual((by_pos[9100]["ID"], by_pos[9100]["INFO"]["POS19"]), ("rs9000", "9000"))
+        self.assertEqual(by_pos[200000]["ID"], ".")
+        self.assertEqual(by_pos[9100]["ID"], "rs9000")
 
     def test_p_value_of_zero_is_recovered_from_the_z_score(self):
         raw = write_table(self.tmp / "gwas.tsv", HEADER, [[1, 7000, "rs70", "A", "G", 0.3, 0.5, 0.01, 0, 5000]])
@@ -168,7 +173,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(list(result.by_id()), ["rs51"])
         rs51 = result.by_id()["rs51"]
-        self.assertEqual((rs51["POS"], rs51["REF"], rs51["ALT"], rs51["INFO"]["POS19"]), (248945923, "G", "T", "7500"))
+        self.assertEqual((rs51["POS"], rs51["REF"], rs51["ALT"]), (248945923, "G", "T"))
         self.assertEqual(result.qc["liftover"]["hg19_to_hg38"]["other_chrom"], 1)
 
     def test_exclusions_without_joins_keep_rows_aligned(self):
@@ -204,23 +209,16 @@ class ReviewRegressionTests(unittest.TestCase):
 
     def test_reruns_follow_manifest_and_setting_changes(self):
         ref = self.reference([("1", "rs80", 8000, "A", "G", 0.3), ("1", "rs81", 8100, "A", "T", 0.3)])
-        # rs81 is an A/T SNP with EAF 0.45: ambiguous, so analysis QC drops it.
         raw = write_table(self.tmp / "gwas.tsv", HEADER, [[1, 8000, "rs80", "A", "G", 0.3, 0.1, 0.02, 1e-6, 5000],
                                                           [1, 8100, "rs81", "A", "T", 0.45, 0.1, 0.02, 1e-6, 5000]])
         first = run_standardise(self.tmp, raw, ref, input_build="hg19", ancestry="EUR", name="row")
-        self.assertIn("##ancestry=EUR", first.header)
+        self.assertEqual(first.sample["Ancestry"], "EUR")
         second = run_standardise(self.tmp, raw, ref, input_build="hg19", ancestry="EAS", phenotype="Body mass index", name="row")
-        self.assertIn("##ancestry=EAS", second.header)
-        self.assertIn("##phenotype=Body mass index", second.header)
-        third = run_standardise(self.tmp, raw, ref, input_build="hg19", ancestry="EAS", phenotype="Body mass index",
-                                analysis_qc=True, name="row")
-        self.assertTrue(third.qc["analysis_qc"])
-        self.assertEqual([r["ID"] for r in third.rows], ["rs80"])
-        self.assertFalse(third.record.get("reused_existing_outputs", False))
-        fourth = run_standardise(self.tmp, raw, ref, input_build="hg19", ancestry="EAS", phenotype="Body mass index",
-                                 analysis_qc=True, name="row")
-        self.assertTrue(fourth.record["reused_existing_outputs"])
-        self.assertEqual(fourth.qc["completed_at"], third.qc["completed_at"])
+        self.assertEqual((second.sample["Ancestry"], second.sample["Phenotype"]), ("EAS", "Body mass index"))
+        self.assertFalse(second.record.get("reused_existing_outputs", False))
+        third = run_standardise(self.tmp, raw, ref, input_build="hg19", ancestry="EAS", phenotype="Body mass index", name="row")
+        self.assertTrue(third.record["reused_existing_outputs"])
+        self.assertEqual(third.qc["completed_at"], second.qc["completed_at"])
 
     def test_odds_ratios_and_their_confidence_interval_are_converted(self):
         raw = write_table(self.tmp / "gwas.tsv", ["CHR", "POS", "SNP", "EA", "OA", "EAF", "OR", "L95", "U95", "P", "N"],
@@ -304,7 +302,7 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         outputs = sorted(p.name for p in Path(result.record["standard_vcf"]).parent.iterdir())
         self.assertEqual(outputs, ["standardised.gwas.vcf.gz", "standardised.gwas.vcf.gz.tbi", "standardised.metadata.json",
-                                   "standardised.qc.json", "standardised.steps.txt"])
+                                   "standardised.qc.json"])
         self.assertEqual(list(scratch.iterdir()), [])
 
     def test_genomic_inflation_and_provenance_are_recorded(self):

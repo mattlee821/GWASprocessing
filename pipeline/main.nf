@@ -27,7 +27,6 @@ process PREPARE_MANIFEST {
       --config-root "${params.config_root}" \\
       --reference-root "${params.reference_root}" \\
       --study-yaml "${params.study_yaml}" \\
-      --analysis-qc "${params.analysis_qc}" \\
       --output run_manifest.tsv \\
       --summary run_manifest_summary.json \\
       --rows-dir rows \\
@@ -64,7 +63,6 @@ process STANDARDISE_ROW {
       --reference-root "${params.reference_root}" \\
       --force "${params.force}" \\
       --dry-run "${params.dry_run}" \\
-      --analysis-qc "${params.analysis_qc}" \\
       --workers ${task.cpus} \\
       --output standardise_record.json
 

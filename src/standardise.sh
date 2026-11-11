@@ -51,13 +51,10 @@ Options:
   --force               Re-run rows even when complete outputs exist for the current settings.
   --dry-run             Build the run manifest without downloading or standardising.
   --qcplot true|false   Create the raw/standardised QQ plot TIFF. Default: true.
-  --analysis-qc true|false
-                        Apply analysis QC (biallelic SNPs, palindromic strand resolution, MAF>=0.01,
-                        positional de-duplication) before writing. Default: false.
   -h, --help            Show this help.
 
 Environment (or server.env, then .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
-GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_QCPLOT, GWAS_ANALYSIS_QC, GWAS_ROW_LIMIT,
+GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_QCPLOT, GWAS_ROW_LIMIT,
 GWAS_VENV (Python virtual environment to put first on PATH), NEXTFLOW (path to the nextflow launcher).
 USAGE
 }
@@ -83,7 +80,6 @@ CONFIG_ROOT="${GWAS_CONFIG_ROOT:-manifests}"
 TEMP_ROOT="${GWAS_TEMP_ROOT:-temp}"
 LOG_ROOT="${GWAS_LOG_ROOT:-temp/logs}"
 QCPLOT="${GWAS_QCPLOT:-true}"
-ANALYSIS_QC="${GWAS_ANALYSIS_QC:-false}"
 ROW_LIMIT="${GWAS_ROW_LIMIT:-}"
 NEXTFLOW_WORK="${GWAS_NEXTFLOW_WORK:-temp/nextflow_work}"
 NEXTFLOW_LOG="${GWAS_NEXTFLOW_LOG:-temp/.nextflow.log}"
@@ -103,7 +99,6 @@ while [[ $# -gt 0 ]]; do
     --force) FORCE="true"; shift ;;
     --dry-run) DRY_RUN="true"; shift ;;
     --qcplot) QCPLOT="$2"; shift 2 ;;
-    --analysis-qc) ANALYSIS_QC="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
@@ -117,8 +112,7 @@ if [[ -z "${PROFILE}" ]]; then
   fi
 fi
 QCPLOT="$(lower "${QCPLOT}")"
-ANALYSIS_QC="$(lower "${ANALYSIS_QC}")"
-for pair in "--qcplot:${QCPLOT}" "--analysis-qc:${ANALYSIS_QC}"; do
+for pair in "--qcplot:${QCPLOT}"; do
   case "${pair#*:}" in
     true|false) ;;
     *) echo "${pair%%:*} must be true or false" >&2; exit 2 ;;
@@ -199,7 +193,6 @@ cmd=(
   --force "${FORCE}"
   --dry_run "${DRY_RUN}"
   --qcplot "${QCPLOT}"
-  --analysis_qc "${ANALYSIS_QC}"
   --row_limit "${ROW_LIMIT}"
 )
 if [[ -n "${STUDY_YAML}" ]]; then cmd+=(--study_yaml "${STUDY_YAML}"); fi

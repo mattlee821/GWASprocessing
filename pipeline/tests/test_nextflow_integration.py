@@ -30,9 +30,9 @@ class NextflowIntegrationTests(unittest.TestCase):
                           [[1, 1000, "rs1", "A", "G", 0.1, 0.02, 1e-6]])
         self.manifest = manifests / "manifest.tsv"
         self.manifest.write_text(
-            "GWAS_location\tphenotype\tancestry\tauthor\tyear\tPMID\n"
-            f'{good}\tBMI "adjusted" $HOME\tEUR\tLocke\t2015\t1\n'
-            f"{bad}\tWHR\tEUR\tBad\t2020\t2\n",
+            "GWAS_location\tphenotype\tancestry\tauthor\tyear\tPMID\tinput_build\n"
+            f'{good}\tBMI "adjusted" $HOME\tEUR\tLocke\t2015\t1\thg19\n'
+            f"{bad}\tWHR\tEUR\tBad\t2020\t2\thg19\n",
             encoding="utf-8",
         )
         self.env = {
@@ -61,7 +61,7 @@ class NextflowIntegrationTests(unittest.TestCase):
         vcf = Path(row["standard_vcf"])
         for key in ("standard_vcf", "standard_index", "metadata_json", "qc_json", "plot_tiff"):
             self.assertTrue(Path(row[key]).stat().st_size > 0, key)
-        self.assertIn('##phenotype=BMI "adjusted" $HOME', read_vcf_text(vcf))
+        self.assertIn('Phenotype="BMI \\"adjusted\\" $HOME"', read_vcf_text(vcf))
         first_hash = row["settings_hash"]
 
         second = self.run_pipeline()
@@ -69,11 +69,12 @@ class NextflowIntegrationTests(unittest.TestCase):
         summary = json.loads((self.tmp / "temp" / "logs" / "run_manifest_summary.json").read_text(encoding="utf-8"))
         self.assertEqual((summary["rows_skipped_complete"], summary["rows_to_run"]), (1, 1))
 
-        third = self.run_pipeline("--analysis-qc", "true", "--only-study", "locke_2015_1")
+        study_yaml = self.tmp / "tolerance.yaml"
+        study_yaml.write_text("palindromic_tolerance: 0.1\n", encoding="utf-8")
+        third = self.run_pipeline("--study-yaml", str(study_yaml), "--only-study", "locke_2015_1")
         self.assertEqual(third.returncode, 0, third.stdout + third.stderr)
         (row,) = self.state().values()
         self.assertNotEqual(row["settings_hash"], first_hash)
-        self.assertTrue(json.loads(Path(row["qc_json"]).read_text(encoding="utf-8"))["analysis_qc"])
 
 
 if __name__ == "__main__":

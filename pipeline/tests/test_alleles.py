@@ -93,28 +93,30 @@ class EafFillTests(unittest.TestCase):
 
 
 class PalindromicResolutionTests(unittest.TestCase):
-    def test_resolve_palindromic_strand_keep_flip_drop(self):
+    def test_palindromes_are_kept_complemented_or_marked_ambiguous_never_dropped(self):
         ref = lookup([("1", "rsP1", 1000, "A", "T", 0.20), ("1", "rsP2", 1001, "C", "G", 0.15), ("1", "rsP3", 1002, "A", "T", 0.47)])
         data = frame(SNP=["rsP1", "rsP2", "rsP3", "rsP4", "rsN1"], EA=["A", "C", "A", "A", "A"], OA=["T", "G", "T", "T", "G"],
                      EAF=[0.20, 0.85, 0.47, 0.20, 0.30], EAF_SOURCE=["input"] * 5)
         qc = {}
-        resolved, dropped = alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), dict(alleles.ANALYSIS_QC_DEFAULTS), qc)
-        self.assertEqual(dropped, 2)
+        resolved = alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), qc)
+        self.assertEqual(len(resolved), 5)
         detail = qc["palindromic_resolution"]
-        self.assertEqual((detail["kept_same_strand"], detail["flipped"], detail["dropped_ambiguous"], detail["dropped_no_reference"]), (1, 1, 1, 1))
+        self.assertEqual((detail["kept_same_strand"], detail["flipped"], detail["ambiguous_frequency_near_half"],
+                          detail["ambiguous_no_reference"]), (1, 1, 1, 1))
         by_snp = resolved.set_index("SNP")
-        self.assertEqual((by_snp.loc["rsP1", "EA"], by_snp.loc["rsP1", "OA"]), ("A", "T"))
-        self.assertEqual((by_snp.loc["rsP2", "EA"], by_snp.loc["rsP2", "OA"]), ("G", "C"))
-        self.assertIn("rsN1", by_snp.index)
+        self.assertEqual((by_snp.loc["rsP1", "EA"], by_snp.loc["rsP1", "OA"], by_snp.loc["rsP1", "PAL"]), ("A", "T", "forward"))
+        self.assertEqual((by_snp.loc["rsP2", "EA"], by_snp.loc["rsP2", "OA"], by_snp.loc["rsP2", "PAL"]), ("G", "C", "complemented"))
+        self.assertEqual((by_snp.loc["rsP3", "PAL"], by_snp.loc["rsP4", "PAL"], by_snp.loc["rsN1", "PAL"]), ("ambiguous", "ambiguous", ""))
+        self.assertEqual((by_snp.loc["rsP4", "EA"], by_snp.loc["rsP4", "OA"]), ("A", "T"))
 
     def test_reference_filled_frequency_never_drives_a_flip(self):
-        # EAF came from the reference itself, so it carries no strand information: drop, never flip.
+        # EAF came from the reference itself, so it carries no strand information: ambiguous, never flipped.
         data = frame(EA=["A"], OA=["T"], EAF=[0.2], EAF_SOURCE=["reference"], BETA=[0.1])
         qc = {}
-        resolved, dropped = alleles.resolve_palindromic_strand(
-            alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "T", 0.8)])), dict(alleles.ANALYSIS_QC_DEFAULTS), qc)
-        self.assertEqual((len(resolved), dropped), (0, 1))
-        self.assertEqual(qc["palindromic_resolution"]["dropped_no_study_eaf"], 1)
+        resolved = alleles.resolve_palindromic_strand(
+            alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "T", 0.8)])), qc)
+        self.assertEqual((len(resolved), resolved["PAL"].iloc[0], resolved["EA"].iloc[0]), (1, "ambiguous", "A"))
+        self.assertEqual(qc["palindromic_resolution"]["ambiguous_no_study_eaf"], 1)
         self.assertEqual(qc["palindromic_resolution"]["flipped"], 0)
 
     def test_minus_strand_palindrome_is_judged_in_grch37_orientation(self):
@@ -122,34 +124,31 @@ class PalindromicResolutionTests(unittest.TestCase):
         # and the reference frequency of A is 0.2: same strand, so the variant is kept unchanged.
         data = frame(EA=["T"], OA=["A"], EAF=[0.2], EAF_SOURCE=["input"], LIFT_STRAND=["-"])
         qc = {}
-        resolved, dropped = alleles.resolve_palindromic_strand(
-            alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "T", 0.2)])), dict(alleles.ANALYSIS_QC_DEFAULTS), qc)
-        self.assertEqual(dropped, 0)
-        self.assertEqual((resolved["EA"].iloc[0], resolved["OA"].iloc[0]), ("T", "A"))
+        resolved = alleles.resolve_palindromic_strand(
+            alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "T", 0.2)])), qc)
+        self.assertEqual((resolved["EA"].iloc[0], resolved["OA"].iloc[0], resolved["PAL"].iloc[0]), ("T", "A", "forward"))
         self.assertEqual(qc["palindromic_resolution"]["kept_same_strand"], 1)
 
-    def test_without_reference_alleles_every_palindrome_is_dropped(self):
+    def test_without_reference_alleles_every_palindrome_is_ambiguous(self):
         data = frame(EA=["A", "C", "A"], OA=["T", "G", "G"], EAF=[0.2, 0.2, 0.2], EAF_SOURCE=["input"] * 3)
         bare = pd.DataFrame(columns=["CHR", "SNP", "POS19", "A1", "A2", "AF1"])
         qc = {}
-        resolved, dropped = alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, bare), dict(alleles.ANALYSIS_QC_DEFAULTS), qc)
-        self.assertEqual((dropped, len(resolved)), (2, 1))
+        resolved = alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, bare), qc)
+        self.assertEqual(resolved["PAL"].tolist(), ["ambiguous", "ambiguous", ""])
+
+    def test_tolerance_can_be_widened(self):
+        data = frame(EA=["A"], OA=["T"], EAF=[0.38], EAF_SOURCE=["input"])
+        ref = lookup([("1", "rs1", 1000, "A", "T", 0.30)])
+        self.assertEqual(alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), {})["PAL"].iloc[0], "forward")
+        self.assertEqual(alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), {}, 0.15)["PAL"].iloc[0],
+                         "ambiguous")
 
 
-class DeduplicationAndQcTests(unittest.TestCase):
+class DeduplicationTests(unittest.TestCase):
     def test_the_same_variant_coded_both_ways_is_kept_once(self):
         data = frame(POS38=[5000, 5000, 5000], EA=["A", "G", "A"], OA=["G", "A", "C"], BETA=[0.1, -0.1, 0.2])
         kept, removed = alleles.deduplicate(data)
         self.assertEqual((removed, kept["BETA"].tolist()), (1, [0.1, 0.2]))
-
-    def test_analysis_qc_filters_run_in_order_with_counts(self):
-        ref = lookup([("1", "rs1", 1000, "A", "G", 0.3)])
-        data = frame(POS38=[1, 2, 3, 4, 1], POS19=[1000, 1001, 1002, 1003, 1000], EA=["A", "AT", "A", "A", "A"],
-                     OA=["G", "G", "T", "G", "G"], EAF=[0.30, 0.30, 0.30, 0.005, 0.30], EAF_SOURCE=["input"] * 5)
-        qc = {}
-        kept = alleles.apply_analysis_qc(alleles.annotate_with_reference(data, ref), {}, qc)
-        self.assertEqual(len(kept), 1)
-        self.assertEqual(qc["qc_removed"], {"non_biallelic": 1, "palindromic": 1, "maf_below_0.01": 1, "duplicate": 1})
 
 
 class ConcordanceTests(unittest.TestCase):

@@ -30,7 +30,7 @@ class AuditTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.tmp = Path(tempfile.mkdtemp())
-        result = run_standardise(cls.tmp, EXAMPLES / "tables/generic.tsv", EXAMPLES / "reference")
+        result = run_standardise(cls.tmp, EXAMPLES / "tables/generic.tsv", EXAMPLES / "reference", input_build="hg19")
         assert result.returncode == 0, result.stderr
         cls.vcf = Path(result.record["standard_vcf"])
 
