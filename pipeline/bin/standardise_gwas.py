@@ -533,13 +533,108 @@ def _snv_mask(ea: pd.Series, oa: pd.Series) -> np.ndarray:
     return (ea.isin(list("ACGT")) & oa.isin(list("ACGT"))).to_numpy()
 
 
+_BCFTOOLS_LIFTOVER: dict[str, Any] = {}
+
+
+def bcftools_liftover() -> str:
+    """Path of a bcftools with the +liftover plugin (GWAS_BCFTOOLS, else bcftools on PATH; BCFTOOLS_PLUGINS must point at
+    the plugin), or '' when unavailable."""
+    if "path" not in _BCFTOOLS_LIFTOVER:
+        candidate = os.environ.get("GWAS_BCFTOOLS", "") or shutil.which("bcftools") or ""
+        ok = False
+        if candidate:
+            try:
+                listed = subprocess.run([candidate, "plugin", "-l"], capture_output=True, text=True, timeout=60).stdout
+                ok = any(line.strip() == "liftover" for line in listed.splitlines())
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+        _BCFTOOLS_LIFTOVER["path"] = candidate if ok else ""
+    return _BCFTOOLS_LIFTOVER["path"]
+
+
+def lift_with_bcftools(out: pd.DataFrame, rows: pd.Index, reference_root: str, report: dict[str, Any]) -> pd.DataFrame:
+    """Lift GRCh37 rows to GRCh38 with BCFtools/liftover (Genovese et al. 2024): alleles are first oriented to the GRCh37
+    reference (REF must match the source genome), then lifted with both FASTAs and the UCSC chain; the plugin swaps
+    alleles where the reference allele changed between builds and complements them on minus-strand blocks. The effect
+    allele is followed through, so ES and EAF need no change here (GRCh38 alignment orients them afterwards)."""
+    fasta37 = alleles.Fasta.find(reference_root, "GRCh37")
+    fasta38 = alleles.Fasta.find(reference_root)
+    chain = Path(reference_root) / "genome" / "hg19ToHg38.over.chain.gz"
+    sub = out.loc[rows]
+    action = alleles.reference_alignment(sub["CHR"], sub["POS19"], sub["EA"], sub["OA"], fasta37)["action"].to_numpy()
+    ea, oa = upper_alleles(sub["EA"]).to_numpy(), upper_alleles(sub["OA"]).to_numpy()
+    cea, coa = complement_alleles(sub["EA"]).to_numpy(), complement_alleles(sub["OA"]).to_numpy()
+    ref = np.select([action == "keep", action == "swap", action == "complement", action == "complement_swap"], [oa, ea, coa, cea], "")
+    alt = np.select([action == "keep", action == "swap", action == "complement", action == "complement_swap"], [ea, oa, cea, coa], "")
+    ea_is_alt = np.isin(action, ["keep", "complement"])
+    usable = ref != ""
+    report["grch37_allele_mismatch"] = int((~usable).sum())
+    out.loc[rows, "POS38"] = np.nan
+    work = make_work_dir()
+    try:
+        vcf = work / "grch37.vcf"
+        contigs = [f"##contig=<ID={name},length={length}>" for name, (length, *_rest) in fasta37.index.items()]
+        lines = ["##fileformat=VCFv4.2", *contigs, "#CHROM\tPOS\tID\tREF\tALT\tQUAL\tFILTER\tINFO"]
+        chrom = normalize_chromosome_series(sub["CHR"]).astype(str).to_numpy()
+        pos = sub["POS19"].to_numpy(dtype="float64")
+        idx = np.where(usable & np.isfinite(pos))[0]
+        order = idx[np.lexsort((pos[idx], gwas_vcf.chrom_ranks(pd.Series(chrom[idx]))))]
+        body = [f"{chrom[i]}\t{int(pos[i])}\t{i}\t{ref[i]}\t{alt[i]}\t.\t.\t." for i in order]
+        vcf.write_text("\n".join(lines + body) + "\n", encoding="utf-8")
+        command = [bcftools_liftover(), "+liftover", "--no-version", str(vcf), "--", "-s", str(fasta37.path), "-f",
+                   str(fasta38.path), "-c", str(chain), "--reject", str(work / "reject.vcf"), "--write-reject"]
+        lifted = subprocess.run(command, capture_output=True, text=True, check=True).stdout
+        new_chr, new_pos = np.full(len(sub), None, dtype=object), np.full(len(sub), np.nan)
+        new_ea, new_oa = ea.copy(), oa.copy()
+        swapped = flipped = added = 0
+        for line in lifted.splitlines():
+            if line.startswith("#"):
+                continue
+            f = line.split("\t")
+            i, info = int(f[2]), f[7]
+            if "," in f[4] or "SWAP=-1" in info:  # a new reference allele was added: not a simple biallelic variant any more
+                added += 1
+                continue
+            swap = "SWAP=1" in info
+            swapped += swap
+            flipped += "FLIP" in info.split(";")
+            # the effect allele was ALT before liftover iff ea_is_alt; a swap exchanges REF and ALT
+            effect_is_alt = bool(ea_is_alt[i]) != swap
+            effect, other = (f[4], f[3]) if effect_is_alt else (f[3], f[4])
+            new_chr[i], new_pos[i], new_ea[i], new_oa[i] = f[0], float(f[1]), effect, other
+        rejected: dict[str, int] = {}
+        reject = work / "reject.vcf"
+        if reject.exists():
+            for line in reject.read_text(encoding="utf-8").splitlines():
+                if line.startswith("#"):
+                    continue
+                fields = line.split("\t")  # --write-reject puts the reason in FILTER (e.g. UnmappedAnchors)
+                reason = fields[6] if len(fields) > 6 and fields[6] not in ("", ".", "PASS") else "rejected"
+                rejected[reason] = rejected.get(reason, 0) + 1
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    lifted_ok = np.isfinite(new_pos)
+    same_chrom = lifted_ok & (normalize_chromosome_series(pd.Series(new_chr)).astype(str).to_numpy() == chrom)
+    out.loc[rows[same_chrom], "POS38"] = new_pos[same_chrom]
+    out.loc[rows[same_chrom], "EA"] = new_ea[same_chrom]
+    out.loc[rows[same_chrom], "OA"] = new_oa[same_chrom]
+    report.update({"tool": "bcftools +liftover", "ok": int(same_chrom.sum()), "other_chrom": int((lifted_ok & ~same_chrom).sum()),
+                   "reference_allele_added": added, "swapped_between_builds": swapped, "minus_strand": flipped,
+                   "rejected": rejected})
+    return out
+
+
 def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, Any], need_pos19: bool = True) -> pd.DataFrame:
     """Give every row a lifted GRCh38 POS38 (dropping failures) and, where needed (the GRCh37 lookup), a GRCh37 POS19."""
     out = out.copy()
     out["LIFT_STRAND"] = "+"
     report = qc.setdefault("liftover", {})
     need38 = (~np.isfinite(out["POS38"]) & np.isfinite(out["POS19"])).to_numpy()
-    if need38.any():
+    if need38.any() and bcftools_liftover() and alleles.Fasta.find(reference_root, "GRCh37") is not None \
+            and alleles.Fasta.find(reference_root) is not None and (Path(reference_root) / "genome" / "hg19ToHg38.over.chain.gz").exists():
+        report["hg19_to_hg38"] = {}
+        out = lift_with_bcftools(out, out.index[need38], reference_root, report["hg19_to_hg38"])
+    elif need38.any():
         lifter, reason = coords.load_liftover(reference_root, "hg19", "hg38")
         if lifter is None:
             raise config_error(
@@ -801,7 +896,10 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
         out["SNP"] = np.where(found > 0, np.char.add("rs", found.astype(str)).astype(object), None)
         qc["rsid_dbsnp"] = {"matched": int((found > 0).sum()), "unmatched": int((found == 0).sum())}
     lap("dbsnp_rsids")
-    keys = settings.get("format_keys") or gwas_vcf.format_keys(c for c in gwas_vcf.OPTIONAL_FORMAT if cols.get(c))
+    # optional FORMAT fields (SS, NC, EZ, SI) are written when the first piece has values for them (a VCF header may
+    # declare fields its records never use)
+    keys = settings.get("format_keys") or gwas_vcf.format_keys(
+        c for c in gwas_vcf.OPTIONAL_FORMAT if cols.get(c) and c in out.columns and np.isfinite(numeric_series(out[c])).any())
     write_piece_lines(part, out, rows[out.index.to_numpy()], low, high, action, extras, keys, settings["afs_label"])
     lap("write_piece")
     decisions = {"cols": cols, "extras": extras, "build": build, "format_keys": keys,

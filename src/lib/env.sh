@@ -44,6 +44,10 @@ fetch() {
     echo "Skip: ${out} already exists"
     return 0
   fi
-  wget -c -O "${out}.part" "${url}"
+  if command -v wget >/dev/null 2>&1; then
+    wget -c -O "${out}.part" "${url}"
+  else
+    curl -fL --retry 5 -C - -o "${out}.part" "${url}"
+  fi
   mv "${out}.part" "${out}"
 }

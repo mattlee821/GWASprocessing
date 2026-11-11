@@ -415,12 +415,13 @@ class Fasta:
         self._data: np.ndarray | None = None
 
     @classmethod
-    def find(cls, reference_root: str | Path) -> "Fasta | None":
+    def find(cls, reference_root: str | Path, build: str = "GRCh38") -> "Fasta | None":
         genome = Path(reference_root) / "genome"
         if not genome.is_dir():
             return None
-        candidates = [genome / "GRCh38.fa", genome / "GRCh38.fasta"]
-        for pattern in ("*GRCh38*.fa", "*GRCh38*.fasta", "*hg38*.fa", "*hg38*.fasta"):
+        alias = {"GRCh38": "hg38", "GRCh37": "hg19"}[build]
+        candidates = [genome / f"{build}.fa", genome / f"{build}.fasta"]
+        for pattern in (f"*{build}*.fa", f"*{build}*.fasta", f"*{alias}*.fa", f"*{alias}*.fasta"):
             candidates.extend(without_appledouble(sorted(genome.glob(pattern))))
         for candidate in candidates:
             if candidate.is_file():

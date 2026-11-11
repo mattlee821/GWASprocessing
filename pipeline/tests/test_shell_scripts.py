@@ -187,6 +187,7 @@ class SetupScriptTests(unittest.TestCase):
         log = self.tmp / "calls.log"
         for tool in ("plink2", "nextflow", "bgzip", "tabix"):
             write_stub(bin_dir, tool, f'echo "{tool} $*" >> "{log}"\n')
+        write_stub(bin_dir, "bcftools", 'if [[ "$1 $2" == "plugin -l" ]]; then echo liftover; fi\n')
         proc = subprocess.run([BASH, str(self.repo / "src" / "source.sh"), "--tools-only"], capture_output=True, text=True,
                               env=sandbox_env(self.tmp, bin_dir), timeout=120)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)

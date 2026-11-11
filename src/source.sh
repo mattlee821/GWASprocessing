@@ -127,6 +127,40 @@ install_python_packages() {
   echo "python packages: installed into ${ROOT_DIR}/${venv} (src/standardise.sh puts it first on PATH)"
 }
 
+# BCFtools/liftover (Genovese et al. 2024) is a bcftools plugin that is not packaged with bcftools: build bcftools with
+# it from source into GWAS_TOOLS_ROOT (default .tools), then record GWAS_BCFTOOLS and BCFTOOLS_PLUGINS in server.env.
+# Without it, GRCh37 inputs are lifted with pyliftover (positions only).
+BCFTOOLS_VERSION="${BCFTOOLS_VERSION:-1.25}"
+install_bcftools_liftover() {
+  if [[ -n "${GWAS_BCFTOOLS:-}" && -x "${GWAS_BCFTOOLS}" ]] && BCFTOOLS_PLUGINS="${BCFTOOLS_PLUGINS:-}" "${GWAS_BCFTOOLS}" plugin -l 2>/dev/null | grep -qx liftover; then
+    echo "bcftools +liftover: found (${GWAS_BCFTOOLS})"
+    return
+  fi
+  if command -v bcftools >/dev/null 2>&1 && bcftools plugin -l 2>/dev/null | grep -qx liftover; then
+    echo "bcftools +liftover: found on PATH ($(command -v bcftools))"
+    return
+  fi
+  local root="${GWAS_TOOLS_ROOT:-${ROOT_DIR}/.tools}" dir
+  dir="${root}/bcftools-${BCFTOOLS_VERSION}"
+  echo "bcftools +liftover: building bcftools ${BCFTOOLS_VERSION} with the liftover plugin in ${dir}"
+  if ! { mkdir -p "${root}" \
+        && { [[ -d "${dir}" ]] || { curl -fsSL -o "${root}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" \
+               "https://github.com/samtools/bcftools/releases/download/${BCFTOOLS_VERSION}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" \
+             && tar -xjf "${root}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" -C "${root}" \
+             && rm -f "${root}/bcftools-${BCFTOOLS_VERSION}.tar.bz2"; }; } \
+        && curl -fsSL -o "${dir}/plugins/liftover.c" https://raw.githubusercontent.com/freeseek/score/master/liftover.c \
+        && (cd "${dir}" && ./configure --disable-libcurl --disable-lzma --disable-bz2 --without-curses >/dev/null \
+            && (cd "htslib-${BCFTOOLS_VERSION}" && ./configure --disable-libcurl --disable-lzma --disable-bz2 >/dev/null) \
+            && make -j4 >/dev/null); } 2>/dev/null; then
+    echo "Warning: could not build bcftools with the liftover plugin; GRCh37 inputs will be lifted with pyliftover" \
+         "(positions only). Set GWAS_BCFTOOLS and BCFTOOLS_PLUGINS in server.env to use an existing build." >&2
+    return 0
+  fi
+  set_env_var GWAS_BCFTOOLS "${dir}/bcftools"
+  set_env_var BCFTOOLS_PLUGINS "${dir}/plugins"
+  echo "bcftools +liftover: built (${dir}/bcftools)"
+}
+
 # R packages are needed only by pipeline/tests/test_audit.py, which checks that R's gwasvcf reads the output.
 install_r_packages() {
   if ! command -v Rscript >/dev/null 2>&1; then
@@ -154,6 +188,7 @@ build_reference_data() {
   bash "${REFDATA}/build_1000genomes_phase3.sh"
   python3 "${REFDATA}/make_1000genomes_lookup_tables.py" --reference-root "${GWAS_REFERENCE_ROOT:-${ROOT_DIR}/references}" ${force_flag[@]+"${force_flag[@]}"}
   bash "${REFDATA}/download_fasta_and_chains.sh"
+  bash "${REFDATA}/build_grch38_references.sh"
   python3 "${REFDATA}/validate_references.py" --reference-root "${GWAS_REFERENCE_ROOT:-${ROOT_DIR}/references}"
 }
 
@@ -186,6 +221,7 @@ main() {
     install_nextflow
     install_htslib
     install_python_packages
+    install_bcftools_liftover
   fi
   if [[ "${TOOLS_ONLY}" -eq 0 ]]; then
     echo "-- Reference data --"

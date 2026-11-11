@@ -3,13 +3,16 @@
 The fixture genome is seeded (821). testlib's offset chains place GRCh38 at GRCh37 + 100 on chromosomes 1 and 2.
 """
 
+import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from testlib import make_reference, run_standardise, write_grch38_references, write_table  # noqa: I001
+from testlib import make_reference, run_standardise, write_fasta, write_grch38_references, write_table  # noqa: I001
 
 import gwas_reference
 
@@ -29,6 +32,37 @@ def fixture(root: Path, n: int = 30):
     reference = make_reference(root / "reference", lookup_rows=[], fasta={"1": genome, "2": genome})
     write_grch38_references(reference, variants, paired=[(v[0], v[1] - OFFSET, v[1], v[3], v[4]) for v in variants])
     return reference, variants
+
+
+def bcftools_liftover_available() -> bool:
+    tool = os.environ.get("GWAS_BCFTOOLS") or shutil.which("bcftools")
+    if not tool:
+        return False
+    listed = subprocess.run([tool, "plugin", "-l"], capture_output=True, text=True).stdout
+    return "liftover" in listed.split()
+
+
+@unittest.skipUnless(bcftools_liftover_available(), "bcftools with the +liftover plugin is required (GWAS_BCFTOOLS, BCFTOOLS_PLUGINS)")
+class BcftoolsLiftoverTests(unittest.TestCase):
+    def test_grch37_inputs_are_lifted_with_the_effect_allele_kept_through_a_reference_change(self):
+        tmp = Path(tempfile.mkdtemp())
+        reference, variants = fixture(tmp)
+        genome38 = (reference / "genome" / "GRCh38.fa").read_text().split("\n", 1)[1].replace("\n", "")
+        swap = variants[5]  # at this site GRCh37 carries the ALT base: the reference allele changed between builds
+        genome37 = list(genome38[OFFSET:])
+        genome37[swap[1] - OFFSET - 1] = swap[4]
+        write_fasta(reference / "genome", {"1": "".join(genome37), "2": genome38[OFFSET:]}, name="GRCh37.fa")
+        header = ["CHR", "POS", "EA", "OA", "EAF", "BETA", "SE", "P"]
+        rows = [[1, v[1] - OFFSET, v[4], v[3], 0.3, 0.1, 0.02, 1e-6] for v in variants]
+        rows[5] = [1, swap[1] - OFFSET, swap[3], swap[4], 0.3, 0.1, 0.02, 1e-6]  # effect = the GRCh38 base, other = the GRCh37 base
+        result = run_standardise(tmp, write_table(tmp / "b37.tsv", header, rows), reference, ancestry="EUR")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lift = result.qc["liftover"]["hg19_to_hg38"]
+        self.assertEqual((lift["tool"], lift["ok"], lift["swapped_between_builds"]), ("bcftools +liftover", 30, 1))
+        moved = next(r for r in result.rows if r["POS"] == swap[1])
+        # the effect allele is the GRCh38 reference base, so it is written as REF and ES is negated relative to ALT
+        self.assertEqual((moved["REF"], moved["ALT"], moved["FORMAT"]["ES"]), (swap[3], swap[4], "-0.1"))
+        self.assertTrue(moved["INFO"]["HM"].startswith("swapped"))
 
 
 class Grch38ReferenceTests(unittest.TestCase):

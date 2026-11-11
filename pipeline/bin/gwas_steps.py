@@ -30,7 +30,10 @@ LIFTOVER_TEXT = {
     "other_chrom": "maps to a different chromosome",
     "multiple": "maps to more than 1 position",
     "minus_strand_non_snv_dropped": "maps to the minus strand and is not a SNV, so the alleles cannot be complemented",
+    "grch37_allele_mismatch": "alleles do not match the GRCh37 reference, so the variant cannot be lifted",
+    "reference_allele_added": "the GRCh38 reference allele is a third allele (no longer a simple variant)",
 }
+LIFTOVER_NOT_REMOVALS = ("ok", "minus_strand", "tool", "swapped_between_builds", "rejected")
 RARE_THRESHOLD = 0.01
 
 
@@ -89,8 +92,9 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
     causes = qc.get("incomplete_by_cause", {}) or {}
     fills = qc.get("reference_fills", {}) or {}
     lift = (qc.get("liftover", {}) or {}).get("hg19_to_hg38", {}) or {}
-    lift_detail = ", ".join(f"{LIFTOVER_TEXT.get(k, k)}: {_n(v):,}" for k, v in lift.items()
-                            if k not in ("ok", "minus_strand") and _n(v))
+    lift_detail = ", ".join([f"{LIFTOVER_TEXT.get(k, k)}: {_n(v):,}" for k, v in lift.items()
+                             if k not in LIFTOVER_NOT_REMOVALS and _n(v)]
+                            + [f"rejected by BCFtools/liftover ({reason}): {_n(v):,}" for reason, v in (lift.get("rejected") or {}).items()])
     notes = [f"{CAUSE_TEXT[c]}: {_rare_note(causes[c])}" for c in COORDINATE_CAUSES if c in causes]
     if lift_detail and "liftover_to_grch38_failed" in causes:
         notes.append(f"liftover failures: {lift_detail}")
@@ -103,8 +107,9 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                  {CAUSE_TEXT[c]: _n((causes.get(c) or {}).get("rows")) for c in COORDINATE_CAUSES},
                  {"positions parsed from chr:pos identifiers": _n(qc.get("positions_from_variant_ids")),
                   "position looked up by rsID": _n(fills.get("POS19")),
-                  "lifted from GRCh37 to GRCh38": _n(lift.get("ok")),
-                  "alleles complemented after a minus-strand liftover": _n(lift.get("minus_strand"))}, notes)
+                  f"lifted from GRCh37 to GRCh38{' (BCFtools/liftover)' if lift.get('tool') else ''}": _n(lift.get("ok")),
+                  "alleles complemented after a minus-strand liftover": _n(lift.get("minus_strand")),
+                  "alleles swapped between builds (reference allele changed)": _n(lift.get("swapped_between_builds"))}, notes)
     rows = _step(steps, rows, "Alleles and statistics",
                  "Every variant needs 2 different alleles made of A, C, G and T, an effect size, a positive standard error "
                  "and a P value.",
