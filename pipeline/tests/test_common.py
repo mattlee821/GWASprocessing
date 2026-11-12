@@ -9,6 +9,8 @@ from pathlib import Path
 
 import testlib  # noqa: F401  (puts pipeline/bin on sys.path)
 
+assert testlib.BIN.is_dir()
+
 import gwas_pipeline_common as common
 
 

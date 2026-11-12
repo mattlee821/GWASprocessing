@@ -8,7 +8,7 @@
 #
 # Usage: bash src/standardise.sh [options]      (from any directory)
 #        sbatch src/standardise.sh [options]    (submit from the repository root; uses the slurm profile)
-# Settings come from command-line options, then environment variables, then server.env, then .env.
+# Settings come from command-line options, then environment variables, then .env (created by src/source.sh).
 # Exit status: Nextflow's status if it failed, 1 if any manifest row failed, otherwise 0.
 
 set -euo pipefail
@@ -56,7 +56,7 @@ Options:
                         --qcplot is accepted as the old name.
   -h, --help            Show this help.
 
-Environment (or server.env, then .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
+Environment (or .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
 GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_REPORT, GWAS_ROW_LIMIT,
 GWAS_VENV (Python virtual environment to put first on PATH), NEXTFLOW (path to the nextflow launcher).
 USAGE
@@ -82,7 +82,7 @@ REFERENCE_ROOT="${GWAS_REFERENCE_ROOT:-references}"
 CONFIG_ROOT="${GWAS_CONFIG_ROOT:-manifests}"
 TEMP_ROOT="${GWAS_TEMP_ROOT:-temp}"
 LOG_ROOT="${GWAS_LOG_ROOT:-temp/logs}"
-REPORT="${GWAS_REPORT:-${GWAS_QCPLOT:-true}}"  # GWAS_QCPLOT: the old name, still in older .env files
+REPORT="${GWAS_REPORT:-${GWAS_QCPLOT:-true}}"  # GWAS_QCPLOT: the old name, still in older settings files
 ROW_LIMIT="${GWAS_ROW_LIMIT:-}"
 NEXTFLOW_WORK="${GWAS_NEXTFLOW_WORK:-temp/nextflow_work}"
 NEXTFLOW_LOG="${GWAS_NEXTFLOW_LOG:-temp/.nextflow.log}"
@@ -170,7 +170,7 @@ elif command -v nextflow >/dev/null 2>&1; then
 elif [[ -x "${ROOT_DIR}/.tools/bin/nextflow" ]]; then
   NEXTFLOW_BIN="${ROOT_DIR}/.tools/bin/nextflow"
 else
-  echo "nextflow not found. Run 'bash src/source.sh --tools-only' or set NEXTFLOW=/path/to/nextflow in server.env" >&2
+  echo "nextflow not found. Run 'bash src/source.sh --tools-only' or set NEXTFLOW=/path/to/nextflow in .env" >&2
   exit 2
 fi
 

@@ -7,7 +7,7 @@
 # GWAS_REFERENCE_RAW_ROOT (default <reference root>/raw); they are read once, start to finish, so they can live on a
 # slow or external drive. The built lookups (about 25 GB) go under GWAS_REFERENCE_ROOT, which should be local disk: they are read at random
 # positions on every run. Needs bcftools and plink2 on PATH (PLINK2 overrides), and python3 with numpy and pandas.
-# Idempotent: existing downloads and builds are skipped (delete a build's meta.json to rebuild it).
+# Idempotent: existing downloads and builds are skipped; GWAS_REFERENCE_FORCE=1 (source.sh --force) rebuilds the lookups.
 set -euo pipefail
 # shellcheck source=src/reference_data/common.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
@@ -19,6 +19,8 @@ ASSEMBLY_REPORT_URL="${ASSEMBLY_REPORT_URL:-https://ftp.ncbi.nlm.nih.gov/genomes
 HG38_PSAM_URL="${HG38_PSAM_URL:-https://www.dropbox.com/scl/fi/u5udzzaibgyvxzfnjcvjc/hg38_corrected.psam?rlkey=oecjnk4vmbhc8b1p202l0ih4x&dl=1}"
 PHASE3_PSAM_URL="${PHASE3_PSAM_URL:-https://www.dropbox.com/s/6ppo144ikdzery5/phase3_corrected.psam?dl=1}"
 PYTHON="${PYTHON:-python3}"
+FORCE_FLAG=()
+[[ "${GWAS_REFERENCE_FORCE:-0}" == 1 ]] && FORCE_FLAG=(--force)
 
 mkdir -p "${RAW}/dbsnp" "${RAW}/1000genomes_hg38/by_chromosome"
 fetch "${ASSEMBLY_REPORT_URL}" "${RAW}/dbsnp/GCF_000001405.40_assembly_report.txt"
@@ -45,10 +47,10 @@ while IFS=$'\t' read -r chrom pgen pvar; do
   fetch "${pvar}" "${RAW}/1000genomes_hg38/by_chromosome/chr${chrom}_hg38.pvar.zst"
 done < "${REFERENCE_SCRIPT_DIR}/1000genomes_grch38_urls.tsv"
 
-"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_index.py" --dbsnp "${RAW}/dbsnp/GCF_000001405.40.gz" \
+"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_index.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --dbsnp "${RAW}/dbsnp/GCF_000001405.40.gz" \
   --assembly-report "${RAW}/dbsnp/GCF_000001405.40_assembly_report.txt" --out "${GWAS_REFERENCE_ROOT}/dbsnp/GRCh38"
-"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_merges.py" --merged "${RAW}/dbsnp/refsnp-merged.json.bz2" \
+"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_merges.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --merged "${RAW}/dbsnp/refsnp-merged.json.bz2" \
   --out "${GWAS_REFERENCE_ROOT}/dbsnp/GRCh38"
-"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_1000genomes_grch38.py" --raw "${RAW}/1000genomes_hg38" \
+"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_1000genomes_grch38.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --raw "${RAW}/1000genomes_hg38" \
   --out "${GWAS_REFERENCE_ROOT}/1000genomes/GRCh38"
-"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_build_detection_sample.py" --reference-root "${GWAS_REFERENCE_ROOT}"
+"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_build_detection_sample.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --reference-root "${GWAS_REFERENCE_ROOT}"

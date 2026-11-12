@@ -1,25 +1,22 @@
 #!/usr/bin/env python3
-"""Reference lookup, allele operations and reference-genome alignment.
+"""Allele operations, 1000 Genomes GRCh38 annotation and reference-genome alignment.
 
-All comparisons with the 1000 Genomes lookup happen in GRCh37 orientation: alleles of a variant that
-lifted onto the minus strand are complemented first. EAF filled from the lookup is the reference
-frequency of the effect allele (not the minor allele) and is marked EAF_SOURCE=reference so it never
+Comparisons with 1000 Genomes happen in GRCh38 orientation at (CHR, POS38). EAF filled from 1000 Genomes is the
+reference frequency of the effect allele (not the minor allele) and is marked EAF_SOURCE=reference so it never
 drives palindromic strand decisions.
 """
 
 from __future__ import annotations
 
-import json
 import os
 import re
-import shutil
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from gwas_coordinates import position_key, rs_number
+from gwas_coordinates import position_key
 from gwas_pipeline_common import (
     alleles_match,
     complement_alleles,
@@ -30,169 +27,18 @@ from gwas_pipeline_common import (
     without_appledouble,
 )
 
-LOOKUP_COLUMNS = ["CHR", "SNP", "POS19", "A1", "A2", "AF1"]  # columns of the lookup files on disk
-PREPARED_COLUMNS = ["CHR", "RS", "POS19", "A1", "A2", "AF1", "KEY"]  # compact in-memory form
-LOOKUP_CHUNK = 2_000_000
-REFERENCE_ANNOTATION = ["REF_SNP", "REF_A1", "REF_A2", "REF_AF1"]
-
 # Palindromic (A/T, C/G) SNPs are resolved by allele frequency with TwoSampleMR's harmonise tolerance.
 PALINDROMIC_TOLERANCE = 0.08
 _ACGT = re.compile(r"^[ACGT]+$")
 
 
 # ---------------------------------------------------------------------------------------------------
-# Reference lookup
+# 1000 Genomes annotation
 # ---------------------------------------------------------------------------------------------------
 
-def prepare_lookup(table: pd.DataFrame) -> pd.DataFrame:
-    """Compact, normalised lookup: CHR (category), RS (rsID number, -1 if none), POS19, A1/A2 (category),
-    AF1 and KEY (chromosome/position key). Accepts files' SNP column or an existing RS column; idempotent."""
-    if list(table.columns) == PREPARED_COLUMNS:
-        return table
-    n = len(table)
-    get = lambda column: table[column] if column in table.columns else pd.Series(np.nan, index=table.index)  # noqa: E731
-    chrom = normalize_chromosome_series(get("CHR"))
-    pos19 = numeric_series(get("POS19")).astype("float64")
-    rs = table["RS"].to_numpy(dtype="int64") if "RS" in table.columns else rs_number(get("SNP").astype("string").str.strip())
-    out = pd.DataFrame({
-        "CHR": pd.Categorical(chrom.to_numpy(dtype=object)), "RS": np.asarray(rs, dtype="int64"), "POS19": pos19.to_numpy(),
-        "A1": pd.Categorical(upper_alleles(get("A1")).to_numpy(dtype=object)),
-        "A2": pd.Categorical(upper_alleles(get("A2")).to_numpy(dtype=object)),
-        "AF1": numeric_series(get("AF1")).astype("float64").to_numpy(),
-        "KEY": position_key(chrom, pos19) if n else np.array([], dtype="int64"),
-    })
-    return out
-
-
-def read_reference_lookup(reference_root: str | Path, population: str) -> tuple[pd.DataFrame, str]:
-    """Load <root>/1000genomes/phase3/lookup/<population>.tsv(.gz), falling back to ALL.
-
-    Returns (prepared lookup, population actually used; "" when nothing was found). The file is read in
-    chunks into the compact form of prepare_lookup; legacy columns (SNPID, EAF_<pop>, POS38) are ignored.
-    The prepared form is cached beside the file (<population>.prepared/) and reused while the file is unchanged.
-    """
-    root = Path(reference_root) / "1000genomes" / "phase3" / "lookup"
-    for pop in dict.fromkeys([str(population or "ALL").upper(), "ALL"]):
-        for suffix in (".tsv.gz", ".tsv"):
-            path = root / f"{pop}{suffix}"
-            if not path.exists():
-                continue
-            cache, stamp = root / f"{pop}.prepared", _source_stamp(path)
-            table = _load_prepared(cache, stamp)
-            if table is None:
-                table = _read_and_prepare(path)
-                _save_prepared(cache, table, stamp)
-            return table, pop
-    return prepare_lookup(pd.DataFrame(columns=LOOKUP_COLUMNS)), ""
-
-
-def _read_and_prepare(path: Path) -> pd.DataFrame:
-    header = pd.read_csv(path, sep="\t", nrows=0).columns
-    usecols = [c for c in LOOKUP_COLUMNS if c in header]
-    chunks = [prepare_lookup(chunk) for chunk in pd.read_csv(
-        path, sep="\t", usecols=usecols, low_memory=False, chunksize=LOOKUP_CHUNK,
-        dtype={c: str for c in ("CHR", "SNP", "A1", "A2") if c in usecols})]
-    table = pd.concat(chunks, ignore_index=True) if chunks else prepare_lookup(pd.DataFrame(columns=usecols))
-    for column in CATEGORY_COLUMNS:
-        table[column] = pd.Categorical(table[column].astype(object))
-    return table
-
-
-CATEGORY_COLUMNS = ("CHR", "A1", "A2")
-NUMERIC_COLUMNS = ("RS", "POS19", "AF1", "KEY")
-PREPARED_CACHE_VERSION = 1  # bump when prepare_lookup changes what it produces
-
-
-def _source_stamp(path: Path) -> dict[str, Any]:
-    stat = path.stat()
-    return {"version": PREPARED_CACHE_VERSION, "source": path.name, "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
-
-
-def _load_prepared(cache: Path, stamp: dict[str, Any]) -> pd.DataFrame | None:
-    """The cached prepared lookup, or None when it is missing, unreadable or made from a different file."""
-    try:
-        meta = json.loads((cache / "meta.json").read_text(encoding="utf-8"))
-        if meta.get("stamp") != stamp:
-            return None
-        columns: dict[str, Any] = {name: np.load(cache / f"{name}.npy", allow_pickle=False) for name in NUMERIC_COLUMNS}
-        for name in CATEGORY_COLUMNS:
-            codes = np.load(cache / f"{name}.codes.npy", allow_pickle=False)
-            columns[name] = pd.Categorical.from_codes(codes, categories=meta["categories"][name])
-        return pd.DataFrame(columns)[PREPARED_COLUMNS]
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def _save_prepared(cache: Path, table: pd.DataFrame, stamp: dict[str, Any]) -> None:
-    """Write the cache atomically; silently skipped when the reference folder is read-only."""
-    categories = {name: list(table[name].cat.categories) for name in CATEGORY_COLUMNS}
-    if not all(isinstance(v, str) for values in categories.values() for v in values):
-        return
-    tmp = cache.with_name(f".{cache.name}.tmp-{os.getpid()}")
-    try:
-        tmp.mkdir(parents=True, exist_ok=True)
-        for name in NUMERIC_COLUMNS:
-            np.save(tmp / f"{name}.npy", table[name].to_numpy())
-        for name in CATEGORY_COLUMNS:
-            np.save(tmp / f"{name}.codes.npy", table[name].cat.codes.to_numpy())
-        (tmp / "meta.json").write_text(json.dumps({"stamp": stamp, "categories": categories}) + "\n", encoding="utf-8")
-        if cache.exists():
-            shutil.rmtree(cache, ignore_errors=True)
-        os.rename(tmp, cache)
-    except OSError:
-        pass  # read-only reference folder, or another process won the race: the next run reads or rebuilds it
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
-
-
-def lookup_has_alleles(lookup: pd.DataFrame) -> bool:
-    return (not lookup.empty) and bool((upper_alleles(lookup["A1"]) != "").any()) and bool(np.isfinite(lookup["AF1"]).any())
-
-
-def grch37_alleles(frame: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Effect/other alleles in GRCh37 orientation (complemented where the liftover strand was '-')."""
-    ea, oa = upper_alleles(frame["EA"]), upper_alleles(frame["OA"])
-    if "LIFT_STRAND" not in frame.columns:
-        return ea, oa
-    minus = frame["LIFT_STRAND"].astype(str).eq("-").to_numpy()
-    ea37 = pd.Series(np.where(minus, complement_alleles(ea).to_numpy(), ea.to_numpy()), index=frame.index, dtype=object)
-    oa37 = pd.Series(np.where(minus, complement_alleles(oa).to_numpy(), oa.to_numpy()), index=frame.index, dtype=object)
-    return ea37, oa37
-
-
-def annotate_with_reference(frame: pd.DataFrame, lookup: pd.DataFrame) -> pd.DataFrame:
-    """Add REF_SNP/REF_A1/REF_A2/REF_AF1 for rows matching the lookup on (CHR, POS19) and alleles."""
-    out = frame.copy()
-    n = len(out)
-    ref_snp = np.full(n, None, dtype=object)
-    ref_a1 = np.full(n, "", dtype=object)
-    ref_a2 = np.full(n, "", dtype=object)
-    ref_af1 = np.full(n, np.nan)
-    if n and lookup_has_alleles(lookup):
-        ref = prepare_lookup(lookup)
-        ea37, oa37 = grch37_alleles(out)
-        probe = pd.DataFrame({"_row": np.arange(n), "KEY": position_key(out["CHR"], out["POS19"]),
-                              "A": ea37.to_numpy(), "B": oa37.to_numpy()})
-        probe = probe[probe["KEY"] >= 0]
-        candidates = ref.loc[ref["KEY"].isin(probe["KEY"]).to_numpy(), ["KEY", "RS", "A1", "A2", "AF1"]]
-        merged = probe.merge(candidates, on="KEY", how="inner")
-        if not merged.empty:
-            merged = merged[alleles_match(merged["A"], merged["B"], merged["A1"].astype(object), merged["A2"].astype(object))]
-            merged = merged.drop_duplicates("_row", keep="first")
-            rows = merged["_row"].to_numpy()
-            rs = merged["RS"].to_numpy(dtype="int64")
-            ref_snp[rows] = np.where(rs >= 0, np.char.add("rs", rs.astype(str)).astype(object), None)
-            ref_a1[rows] = merged["A1"].astype(object).to_numpy()
-            ref_a2[rows] = merged["A2"].astype(object).to_numpy()
-            ref_af1[rows] = merged["AF1"].to_numpy(dtype="float64")
-    out["REF_SNP"], out["REF_A1"], out["REF_A2"], out["REF_AF1"] = ref_snp, ref_a1, ref_a2, ref_af1
-    return out
-
-
 def annotate_with_frequencies(frame: pd.DataFrame, freqs: Any) -> pd.DataFrame:
-    """GRCh38 counterpart of annotate_with_reference: REF_A1 (1000 Genomes ALT), REF_A2 (REF) and REF_AF1 (ALT
-    frequency in freqs.population) for rows matching a record at (CHR, POS38) on either strand. Alleles are in
-    GRCh38 orientation, so LIFT_STRAND is reset to '+' (no GRCh37 re-orientation)."""
+    """REF_A1 (1000 Genomes ALT), REF_A2 (REF) and REF_AF1 (ALT frequency in freqs.population) for rows matching a
+    record at (CHR, POS38) with the same alleles on either strand."""
     out = frame.copy()
     n = len(out)
     ref_a1 = np.full(n, "", dtype=object)
@@ -208,20 +54,8 @@ def annotate_with_frequencies(frame: pd.DataFrame, freqs: Any) -> pd.DataFrame:
             ref_a1[match], ref_a2[match] = a1[match].to_numpy(), a2[match].to_numpy()
             ref_af1[match] = candidates[f"AF1_{k}"].to_numpy()[match]
             done |= match
-    out["REF_SNP"], out["REF_A1"], out["REF_A2"], out["REF_AF1"] = np.full(n, None, dtype=object), ref_a1, ref_a2, ref_af1
-    out["LIFT_STRAND"] = "+"
+    out["REF_A1"], out["REF_A2"], out["REF_AF1"] = ref_a1, ref_a2, ref_af1
     return out
-
-
-def fill_missing_rsids(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    out = frame.copy()
-    snp = out["SNP"].astype("string").str.strip()
-    missing = (snp.isna() | ~snp.str.lower().str.startswith("rs", na=False)).to_numpy()
-    available = pd.Series(out["REF_SNP"]).notna().to_numpy()
-    fill = missing & available
-    out["SNP"] = out["SNP"].astype(object)
-    out.loc[fill, "SNP"] = out.loc[fill, "REF_SNP"]
-    return out, int(fill.sum())
 
 
 def reference_af_of_effect_allele(frame: pd.DataFrame) -> np.ndarray:
@@ -231,7 +65,7 @@ def reference_af_of_effect_allele(frame: pd.DataFrame) -> np.ndarray:
     """
     if "REF_AF1" not in frame.columns:
         return np.full(len(frame), np.nan)
-    ea37, oa37 = grch37_alleles(frame)
+    ea37, oa37 = upper_alleles(frame["EA"]), upper_alleles(frame["OA"])
     ea37_arr = ea37.to_numpy()
     comp_ea = complement_alleles(ea37).to_numpy()
     a1 = upper_alleles(pd.Series(frame["REF_A1"])).to_numpy()

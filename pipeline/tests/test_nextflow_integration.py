@@ -12,7 +12,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import EXAMPLES, SRC, read_vcf_text, write_table
+from testlib import SRC, example_reference, generic_grch38_table, read_vcf_text, write_table
 
 import gwas_pipeline_common as common
 
@@ -25,23 +25,23 @@ class NextflowIntegrationTests(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp())
         manifests = self.tmp / "manifests"
         manifests.mkdir()
-        good = shutil.copy(EXAMPLES / "tables/generic.tsv", self.tmp / "good.tsv")
+        good = generic_grch38_table(self.tmp / "good.tsv")  # GRCh38 positions: no liftover needed
         bad = write_table(self.tmp / "bad.tsv", ["CHR", "POS", "SNP", "EA", "OA", "Estimate", "SE", "P"],
                           [[1, 1000, "rs1", "A", "G", 0.1, 0.02, 1e-6]])
         self.manifest = manifests / "manifest.tsv"
         self.manifest.write_text(
             "GWAS_location\tphenotype\tancestry\tauthor\tyear\tPMID\tinput_build\n"
-            f'{good}\tBMI "adjusted" $HOME\tEUR\tLocke\t2015\t1\thg19\n'
-            f"{bad}\tWHR\tEUR\tBad\t2020\t2\thg19\n",
+            f'{good}\tBMI "adjusted" $HOME\tEUR\tLocke\t2015\t1\thg38\n'
+            f"{bad}\tWHR\tEUR\tBad\t2020\t2\thg38\n",
             encoding="utf-8",
         )
         self.env = {
             **os.environ,
             "PATH": f"{Path(sys.executable).parent}{os.pathsep}{os.environ['PATH']}",
-            "GWAS_WORK_ROOT": str(self.tmp / "GWAS"), "GWAS_REFERENCE_ROOT": str(EXAMPLES / "reference"),
+            "GWAS_WORK_ROOT": str(self.tmp / "GWAS"), "GWAS_REFERENCE_ROOT": str(example_reference()),
             "GWAS_CONFIG_ROOT": str(manifests), "GWAS_TEMP_ROOT": str(self.tmp / "temp"),
             "GWAS_LOG_ROOT": str(self.tmp / "temp" / "logs"), "GWAS_NEXTFLOW_WORK": str(self.tmp / "work"),
-            "GWAS_NEXTFLOW_LOG": str(self.tmp / "temp" / ".nextflow.log"), "GWAS_QCPLOT": "true", "NXF_ANSI_LOG": "false",
+            "GWAS_NEXTFLOW_LOG": str(self.tmp / "temp" / ".nextflow.log"), "GWAS_REPORT": "true", "NXF_ANSI_LOG": "false",
         }
 
     def run_pipeline(self, *extra):

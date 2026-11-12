@@ -433,21 +433,17 @@ def detect_build_paired(rows: pd.DataFrame, paired: dict[str, Any]) -> dict[str,
     return result
 
 
-def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[str, Any], lookup: pd.DataFrame,
-                        reference_root: str, qc: dict[str, Any]) -> str:
+def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[str, Any], reference_root: str,
+                        qc: dict[str, Any]) -> str:
     """The input build, detected from the data in the first instance: a fixed-seed sample of positions and alleles
-    is matched to the reference under each build (gwas_coordinates.detect_build). A declared build (manifest, YAML,
+    is matched to the same common SNPs placed in GRCh37 and GRCh38 (detect_build_paired). A declared build (manifest, YAML,
     source metadata, VCF header) is used only when detection makes no call; a declared build that disagrees with a
     detected one is reported as a warning, not used."""
     declared, declared_source = declared_build(record, config)
     rows = out[np.isfinite(out["POS"]) & ~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])]
-    detection: dict[str, Any] = {"build": "", "reason": "reference lookup without alleles"}
     paired = grch38.paired_build_sample(reference_root)
-    if paired is not None:
-        detection = detect_build_paired(rows, paired)
-    elif alleles.lookup_has_alleles(lookup):
-        lifter, _ = coords.load_liftover(reference_root, "hg38", "hg19")
-        detection = coords.detect_build(rows["CHR"], rows["POS"], rows["EA"], rows["OA"], lookup, lifter)
+    detection = detect_build_paired(rows, paired) if paired is not None else \
+        {"build": "", "reason": "build-detection sample not installed (src/reference_data/build_grch38_references.sh)"}
     qc["build_detection"] = {**detection, "declared": declared, "declared_source": declared_source}
     names = {"hg19": "GRCh37", "hg38": "GRCh38"}
     detected = detection.get("build", "")
@@ -513,41 +509,6 @@ def fill_coordinates_from_dbsnp(out: pd.DataFrame, dbsnp: Any, qc: dict[str, Any
     return out
 
 
-def fill_coordinates_by_rsid(out: pd.DataFrame, reference_root: str, lookup: pd.DataFrame, qc: dict[str, Any]) -> pd.DataFrame:
-    fills = qc.setdefault("reference_fills", {})
-    fills.setdefault("CHR", 0)
-    fills.setdefault("POS19", 0)
-    snp = out["SNP"].astype("string")
-    need = (~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])).to_numpy() & snp.str.match(r"^rs\d+$").fillna(False).to_numpy(dtype=bool)
-    if not need.any():
-        qc.setdefault("coordinate_source", "input")
-        return out
-    index = coords.CoordinateIndex.load(coords.coordinate_index_dir(reference_root))
-    if index is not None:
-        found = index.lookup(out.loc[need, "SNP"])
-        qc["coordinate_source"] = "coordinate_index"
-    else:
-        ref = alleles.prepare_lookup(lookup)
-        ref = ref[ref["RS"].to_numpy() >= 0].drop_duplicates("RS").set_index("RS")
-        numbers = pd.Series(coords.rs_number(out.loc[need, "SNP"]), index=out.index[need])
-        found = pd.DataFrame({"CHR": numbers.map(ref["CHR"].astype(object)), "POS19": numbers.map(ref["POS19"])}, index=out.index[need])
-        qc["coordinate_source"] = "population_lookup"
-        qc["warnings"].append("rsID coordinate index not found; positions for rows without coordinates come from the population "
-                              "lookup (common biallelic SNPs only). Build it with src/reference_data/make_1000genomes_lookup_tables.py")
-    found_pos = numeric_series(found["POS19"]).to_numpy(dtype="float64")
-    current_chr = out.loc[need, "CHR"]
-    chr_ok = current_chr.isna().to_numpy() | (current_chr.astype(str).to_numpy() == found["CHR"].astype(str).to_numpy())
-    use = np.isfinite(found_pos) & chr_ok
-    rows = out.index[need][use]
-    fills["CHR"] += int(current_chr.isna().to_numpy()[use].sum())
-    out.loc[rows, "CHR"] = found.loc[rows, "CHR"].to_numpy()
-    out.loc[rows, "POS19"] = found_pos[use]
-    fills["POS19"] += int(use.sum())
-    # Counted here and reported once per table (count_warnings), so pieces of a table add up.
-    qc["rsid_chromosome_conflicts"] = qc.get("rsid_chromosome_conflicts", 0) + int((np.isfinite(found_pos) & ~chr_ok).sum())
-    return out
-
-
 def _snv_mask(ea: pd.Series, oa: pd.Series) -> np.ndarray:
     ea, oa = upper_alleles(ea), upper_alleles(oa)
     return (ea.isin(list("ACGT")) & oa.isin(list("ACGT"))).to_numpy()
@@ -590,6 +551,7 @@ def lift_with_bcftools(out: pd.DataFrame, rows: pd.Index, reference_root: str, r
     usable = ref != ""
     valid = pd.Series(ea).str.fullmatch(r"[ACGT]+").fillna(False).to_numpy(bool) & pd.Series(oa).str.fullmatch(r"[ACGT]+").fillna(False).to_numpy(bool) & (ea != oa)
     report["grch37_allele_mismatch"] = int((~usable & valid).sum())  # rows with invalid alleles are counted as such instead
+    out.loc[rows, "GRCH37_MISMATCH"] = ~usable & valid
     out.loc[rows, "POS38"] = np.nan
     work = make_work_dir()
     try:
@@ -607,6 +569,7 @@ def lift_with_bcftools(out: pd.DataFrame, rows: pd.Index, reference_root: str, r
         lifted = subprocess.run(command, capture_output=True, text=True, check=True).stdout
         new_chr, new_pos = np.full(len(sub), None, dtype=object), np.full(len(sub), np.nan)
         new_ea, new_oa = ea.copy(), oa.copy()
+        new_flip = np.zeros(len(sub), dtype=bool)
         swapped = flipped = added = 0
         for line in lifted.splitlines():
             if line.startswith("#"):
@@ -618,7 +581,9 @@ def lift_with_bcftools(out: pd.DataFrame, rows: pd.Index, reference_root: str, r
                 continue
             swap = "SWAP=1" in info
             swapped += swap
-            flipped += "FLIP" in info.split(";")
+            flip = "FLIP" in info.split(";")
+            flipped += flip
+            new_flip[i] = flip
             # the effect allele was ALT before liftover iff ea_is_alt; a swap exchanges REF and ALT
             effect_is_alt = bool(ea_is_alt[i]) != swap
             effect, other = (f[4], f[3]) if effect_is_alt else (f[3], f[4])
@@ -639,61 +604,47 @@ def lift_with_bcftools(out: pd.DataFrame, rows: pd.Index, reference_root: str, r
     out.loc[rows[same_chrom], "POS38"] = new_pos[same_chrom]
     out.loc[rows[same_chrom], "EA"] = new_ea[same_chrom]
     out.loc[rows[same_chrom], "OA"] = new_oa[same_chrom]
+    # the alleles now differ in strand from the study's when exactly 1 of these complemented them: orienting to the
+    # GRCh37 reference before liftover, or a minus-strand chain block
+    complemented37 = np.isin(action, ["complement", "complement_swap"])
+    out.loc[rows[same_chrom], "STRAND_CHANGED"] = (complemented37 != new_flip)[same_chrom]
     report.update({"tool": "bcftools +liftover", "ok": int(same_chrom.sum()), "other_chrom": int((lifted_ok & ~same_chrom).sum()),
                    "reference_allele_added": added, "swapped_between_builds": swapped, "minus_strand": flipped,
                    "rejected": rejected})
     return out
 
 
-def establish_dual_build(out: pd.DataFrame, reference_root: str, qc: dict[str, Any], need_pos19: bool = True) -> pd.DataFrame:
-    """Give every row a lifted GRCh38 POS38 (dropping failures) and, where needed (the GRCh37 lookup), a GRCh37 POS19."""
+def lift_to_grch38(out: pd.DataFrame, reference_root: str, qc: dict[str, Any]) -> pd.DataFrame:
+    """Lift rows that have only a GRCh37 position to GRCh38 with BCFtools/liftover; rows it cannot lift keep no GRCh38
+    position and are removed with the other incomplete rows. STRAND_CHANGED marks rows whose alleles were complemented
+    on the way (reported in INFO/HM)."""
     out = out.copy()
-    out["LIFT_STRAND"] = "+"
-    report = qc.setdefault("liftover", {})
-    need38 = (~np.isfinite(out["POS38"]) & np.isfinite(out["POS19"])).to_numpy()
-    if need38.any() and bcftools_liftover() and alleles.Fasta.find(reference_root, "GRCh37") is not None \
-            and alleles.Fasta.find(reference_root) is not None and (Path(reference_root) / "genome" / "hg19ToHg38.over.chain.gz").exists():
-        report["hg19_to_hg38"] = {}
-        out = lift_with_bcftools(out, out.index[need38], reference_root, report["hg19_to_hg38"])
-    elif need38.any():
-        lifter, reason = coords.load_liftover(reference_root, "hg19", "hg38")
-        if lifter is None:
-            raise config_error(
-                f"{int(need38.sum())} variants have only a GRCh37 position and need hg19->hg38 liftover, but {reason}. "
-                "Add hg19ToHg38.over.chain.gz (see src/reference_data/download_fasta_and_chains.sh)."
-            )
-        result = coords.lift(out.loc[need38, "CHR"], out.loc[need38, "POS19"], lifter)
-        rows = out.index[need38]
-        minus = result.ok & (result.strand == "-")
-        snv = _snv_mask(out.loc[rows, "EA"], out.loc[rows, "OA"])
-        positions = result.pos.copy()
-        positions[minus & ~snv] = np.nan
-        out.loc[rows, "POS38"] = positions
-        flip_rows = rows[minus & snv]
-        out.loc[flip_rows, "EA"] = complement_alleles(out.loc[flip_rows, "EA"]).to_numpy()
-        out.loc[flip_rows, "OA"] = complement_alleles(out.loc[flip_rows, "OA"]).to_numpy()
-        out.loc[rows[minus], "LIFT_STRAND"] = "-"
-        report["hg19_to_hg38"] = {**result.counts(), "minus_strand": int(minus.sum()), "minus_strand_non_snv_dropped": int((minus & ~snv).sum())}
-    need19 = (~np.isfinite(out["POS19"]) & np.isfinite(out["POS38"])).to_numpy()
-    if need_pos19 and need19.any():
-        lifter, reason = coords.load_liftover(reference_root, "hg38", "hg19")
-        if lifter is None:
-            qc["pos19_missing_reason"] = reason
-            qc["pos19_missing_variants"] = qc.get("pos19_missing_variants", 0) + int(need19.sum())
-        else:
-            result = coords.lift(out.loc[need19, "CHR"], out.loc[need19, "POS38"], lifter)
-            rows = out.index[need19]
-            out.loc[rows, "POS19"] = result.pos
-            out.loc[rows[result.ok & (result.strand == "-")], "LIFT_STRAND"] = "-"
-            report["hg38_to_hg19"] = {**result.counts(), "minus_strand": int((result.ok & (result.strand == "-")).sum())}
-    return out
+    out["STRAND_CHANGED"] = False
+    out["GRCH37_MISMATCH"] = False
+    need = (~np.isfinite(out["POS38"]) & np.isfinite(out["POS19"])).to_numpy()
+    if not need.any():
+        return out
+    missing = []
+    if not bcftools_liftover():
+        missing.append("bcftools with the +liftover plugin (GWAS_BCFTOOLS, BCFTOOLS_PLUGINS)")
+    if alleles.Fasta.find(reference_root, "GRCh37") is None:
+        missing.append("the GRCh37 FASTA")
+    if alleles.Fasta.find(reference_root) is None:
+        missing.append("the GRCh38 FASTA")
+    if not (Path(reference_root) / "genome" / "hg19ToHg38.over.chain.gz").exists():
+        missing.append("genome/hg19ToHg38.over.chain.gz")
+    if missing:
+        raise config_error(f"{int(need.sum())} variants have only a GRCh37 position and need liftover to GRCh38, but these "
+                           f"are missing: {'; '.join(missing)}. Run bash src/source.sh to install them.")
+    report = qc.setdefault("liftover", {}).setdefault("hg19_to_hg38", {})
+    return lift_with_bcftools(out, out.index[need], reference_root, report)
 
 
 # Why a row without its required fields was dropped: the first cause that applies, in this order, so the causes
 # add up to the rows removed. Coordinate causes come first because a row without a position cannot be used whatever
 # its statistics.
 INCOMPLETE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "missing_allele", "invalid_allele",
-                     "liftover_to_grch38_failed", "chromosome_not_primary", "invalid_position", "missing_beta",
+                     "alleles_do_not_match_grch37", "liftover_to_grch38_failed", "chromosome_not_primary", "invalid_position", "missing_beta",
                      "missing_or_invalid_se", "missing_or_invalid_p")
 
 
@@ -707,6 +658,7 @@ def incomplete_causes(out: pd.DataFrame, checks: dict[str, np.ndarray]) -> np.nd
         no_position & ~rsid,
         ~checks["EA"] | ~checks["OA"],
         ~checks["ALLELES"],  # before liftover: I/D codes or '-' cannot be lifted, and that is not a liftover failure
+        pos19 & ~pos38 & out.get("GRCH37_MISMATCH", pd.Series(False, index=out.index)).fillna(False).to_numpy(dtype=bool),
         pos19 & ~pos38,
         ~checks["CHR"],
         ~checks["POS38"],
@@ -747,17 +699,12 @@ def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any], maf_threshold: f
     return out[keep]
 
 
-def annotate_with_reference(out: pd.DataFrame, lookup: pd.DataFrame, qc: dict[str, Any], freqs: Any = None) -> tuple[pd.DataFrame, dict[str, float]]:
-    """Reference annotation and EAF fills (GRCh38 1000 Genomes when installed, else the GRCh37 lookup, which also
-    fills rsIDs); returns the frame and its allele-frequency concordance moments."""
-    if freqs is not None:
-        out, rsid_fills = alleles.annotate_with_frequencies(out, freqs), 0
-    else:
-        out = alleles.annotate_with_reference(out, lookup)
-        out, rsid_fills = alleles.fill_missing_rsids(out)
+def annotate_with_reference(out: pd.DataFrame, qc: dict[str, Any], freqs: Any) -> tuple[pd.DataFrame, dict[str, float]]:
+    """1000 Genomes GRCh38 frequencies of the matched population and EAF fills; returns the frame and its
+    allele-frequency concordance moments."""
+    out = alleles.annotate_with_frequencies(out, freqs)
     out, eaf_fills = alleles.fill_eaf_from_reference(out)
-    fills = qc.setdefault("reference_fills", {})
-    fills["rsid"], fills["EAF"] = rsid_fills, eaf_fills
+    qc.setdefault("reference_fills", {})["EAF"] = eaf_fills
     return out, alleles.af_moments(out)
 
 
@@ -857,7 +804,7 @@ def read_pieces(raw_path: Path, sep: str, usecols: list[str] | None, chunk_rows:
         yield numbered(read_table(raw_path, delimiter=sep, usecols=usecols, nrows=0))
 
 
-def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.DataFrame, fasta: Any, part: Path) -> dict[str, Any]:
+def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], fasta: Any, part: Path) -> dict[str, Any]:
     """Run every per-row step on one piece and write its lines to `part` (see write_piece_lines).
 
     Returns the piece's QC counts, frequency moments, the decisions later pieces must share, and seconds per step."""
@@ -885,22 +832,19 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
     out = fill_positions_from_ids(out, qc)
     build = settings.get("build")
     if np.isfinite(out["POS"]).any() and (~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"]) & np.isfinite(out["POS"])).any():
-        build = build or resolve_input_build(out, record, config, lookup, reference_root, qc)
+        build = build or resolve_input_build(out, record, config, reference_root, qc)
         target = "POS19" if build == "hg19" else "POS38"
         assign = np.isfinite(out["POS"]) & ~np.isfinite(out[target])
         out.loc[assign, target] = out.loc[assign, "POS"]
     out = out.drop(columns=["POS"])
     lap("positions_and_build")
     dbsnp, freqs, _ = grch38_references(reference_root, settings["population"])
-    if dbsnp is not None:
-        out = fill_coordinates_from_dbsnp(out, dbsnp, qc)
-    else:
-        out = fill_coordinates_by_rsid(out, reference_root, lookup, qc)
+    out = fill_coordinates_from_dbsnp(out, dbsnp, qc)
     lap("rsid_coordinates")
-    out = establish_dual_build(out, reference_root, qc, need_pos19=freqs is None)
+    out = lift_to_grch38(out, reference_root, qc)
     lap("liftover")
     out = drop_incomplete_rows(out, qc)
-    out, moments = annotate_with_reference(out, lookup, qc, freqs)
+    out, moments = annotate_with_reference(out, qc, freqs)
     lap("reference_annotation")
     out = alleles.resolve_palindromic_strand(out, qc, settings["palindromic_tolerance"])
     lap("palindromic_strand")
@@ -911,7 +855,7 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
     else:
         action = np.full(len(out), "unalignable", dtype=object)
     low, high = alleles.dedup_alleles(out)  # unordered allele pair: the same variant reported either way round matches
-    out["HM"] = harmonisation_action(out["PAL"].to_numpy(dtype=object), action)
+    out["HM"] = harmonisation_action(out["PAL"].to_numpy(dtype=object), action, out["STRAND_CHANGED"].to_numpy(dtype=bool))
     lap("grch38_alignment")
     # optional FORMAT fields (SS, NC, EZ, SI) are written when the first piece has values for them (a VCF header may
     # declare fields its records never use)
@@ -933,13 +877,20 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
     return {"qc": qc, "moments": moments, "decisions": decisions, "part": str(part), "timings": timings}
 
 
-def harmonisation_action(pal: np.ndarray, action: np.ndarray) -> np.ndarray:
-    """INFO/HM per row from the palindromic decision (PAL) and the GRCh38 alignment action."""
-    base = {"keep": "forward", "swap": "swapped", "complement": "complemented", "complement_swap": "complemented_swapped",
-            "indel_unmatched": "unverified", "unalignable": "unverified", "drop": "dropped"}
-    words = np.array([base.get(str(a), "unverified") for a in action], dtype=object)
+def harmonisation_action(pal: np.ndarray, action: np.ndarray, strand_changed: np.ndarray | None = None) -> np.ndarray:
+    """INFO/HM per row, relative to the alleles as the study reported them: the palindromic decision (PAL), the GRCh38
+    alignment action, and whether liftover already complemented the alleles (strand_changed; 2 complements cancel)."""
+    if strand_changed is None:
+        strand_changed = np.zeros(len(action), dtype=bool)
     swapped = np.isin(action, ["swap", "complement_swap"])
-    pal_words = np.array(["palindrome_" + str(p) + ("_swapped" if s else "") for p, s in zip(pal, swapped)], dtype=object)
+    complemented = np.isin(action, ["complement", "complement_swap"]) != strand_changed
+    aligned = np.isin(action, ["keep", "swap", "complement", "complement_swap"])
+    strand = np.where(complemented, "complemented", "forward")
+    words = np.where(aligned, np.where(swapped, np.where(complemented, "complemented_swapped", "swapped"), strand),
+                     np.where(action == "drop", "dropped", "unverified")).astype(object)
+    pal_strand = np.array([{"forward": "complemented", "complemented": "forward"}.get(str(p), str(p)) if c else str(p)
+                           for p, c in zip(pal, strand_changed)], dtype=object)
+    pal_words = np.array(["palindrome_" + p + ("_swapped" if sw else "") for p, sw in zip(pal_strand, swapped)], dtype=object)
     return np.where(pal != "", pal_words, words)
 
 
@@ -1185,10 +1136,6 @@ def merge_piece_qc(qc: dict[str, Any], results: list[dict[str, Any]], record: di
     conflicts = qc.pop("rsid_chromosome_conflicts", 0)
     if conflicts:
         qc["warnings"].append(f"{conflicts} rsIDs map to a different chromosome than the input reports; their coordinates were not filled")
-    unlifted = qc.pop("pos19_missing_variants", 0)
-    reason = qc.pop("pos19_missing_reason", "")
-    if unlifted:
-        qc["warnings"].append(f"{reason}; POS19 left missing for {unlifted} variants")
     return moments
 
 
@@ -1207,29 +1154,26 @@ def grch38_references(reference_root: str, population: str) -> tuple[Any, Any, A
 
 
 def _init_worker(reference_root: str, population: str, fasta_path: str) -> None:
-    if grch38_references(reference_root, population)[1] is not None:
-        _WORKER["lookup"] = pd.DataFrame(columns=alleles.LOOKUP_COLUMNS)
-    else:
-        _WORKER["lookup"], _ = alleles.read_reference_lookup(reference_root, population)
+    grch38_references(reference_root, population)  # memory-map the references once per worker
     _WORKER["fasta"] = alleles.Fasta(fasta_path) if fasta_path else None
 
 
 def _piece_in_worker(df: pd.DataFrame, settings: dict[str, Any], part: str) -> dict[str, Any]:
-    return standardise_piece(df, settings, _WORKER["lookup"], _WORKER["fasta"], Path(part))
+    return standardise_piece(df, settings, _WORKER["fasta"], Path(part))
 
 
-def run_pieces(pieces: Any, settings: dict[str, Any], lookup: pd.DataFrame, fasta: Any, work: Path, workers: int) -> list[dict[str, Any]]:
+def run_pieces(pieces: Any, settings: dict[str, Any], fasta: Any, work: Path, workers: int) -> list[dict[str, Any]]:
     """Standardise the first piece here (it fixes the shared decisions), then the rest here or in `workers` processes."""
     part = lambda i: work / f"piece-{i:06d}.txt"  # noqa: E731
     pieces = iter(pieces)
-    results = [standardise_piece(next(pieces), settings, lookup, fasta, part(0))]
+    results = [standardise_piece(next(pieces), settings, fasta, part(0))]
     settings = {**settings, **results[0]["decisions"]}
     if workers <= 1:
         for i, df in enumerate(pieces, start=1):
-            results.append(standardise_piece(df, settings, lookup, fasta, part(i)))
+            results.append(standardise_piece(df, settings, fasta, part(i)))
             settings["build"] = settings["build"] or results[-1]["decisions"]["build"]
         return results
-    context = multiprocessing.get_context("spawn")  # fork is unsafe on macOS; workers load the cached lookup themselves
+    context = multiprocessing.get_context("spawn")  # fork is unsafe on macOS; workers map the references themselves
     initargs = (settings["reference_root"], settings["population"], str(fasta.path) if fasta is not None else "")
     with ProcessPoolExecutor(max_workers=workers, mp_context=context, initializer=_init_worker, initargs=initargs) as pool:
         pending: set[Any] = set()
@@ -1243,7 +1187,7 @@ def run_pieces(pieces: Any, settings: dict[str, Any], lookup: pd.DataFrame, fast
     return results
 
 
-def detect_build_from_head(head: pd.DataFrame, settings: dict[str, Any], lookup: pd.DataFrame, qc: dict[str, Any]) -> str:
+def detect_build_from_head(head: pd.DataFrame, settings: dict[str, Any], qc: dict[str, Any]) -> str:
     """The input build, decided once from the first rows of the file (so it does not depend on the piece size)."""
     config, record = settings["config"], settings["record"]
     scratch: dict[str, Any] = {"warnings": [], "reference_fills": {}}
@@ -1252,14 +1196,14 @@ def detect_build_from_head(head: pd.DataFrame, settings: dict[str, Any], lookup:
     needs = np.isfinite(out["POS"]) & ~np.isfinite(out["POS19"]) & ~np.isfinite(out["POS38"])
     if not needs.any():
         return ""
-    build = resolve_input_build(out, record, config, lookup, settings["reference_root"], scratch)
+    build = resolve_input_build(out, record, config, settings["reference_root"], scratch)
     qc["build_detection"] = scratch["build_detection"]
     qc["warnings"].extend(scratch["warnings"])
     return build
 
 
 def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any], reference_root: str,
-                      lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any], population: str = "ALL", population_used: str = "",
+                      fasta: Any, qc: dict[str, Any], population: str = "ALL", population_used: str = "",
                       workers: int = 1) -> None:
     """Standardise a table or a GWAS-VCF (read into the same canonical columns) to GRCh38 GWAS-VCF."""
     vcf_input = use_vcf_reader(raw_path, config)
@@ -1284,12 +1228,12 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
     head_rows = max(BUILD_HEAD_ROWS, chunk_rows or 0) if chunk_rows else None
     head_pieces = read_vcf_pieces(raw_path, head_rows, config) if vcf_input else \
         read_pieces(raw_path, qc["input_delimiter"], candidate_columns(raw_path, qc["input_delimiter"], config), head_rows, config)
-    settings["build"] = detect_build_from_head(next(iter(head_pieces)), settings, lookup, qc)
+    settings["build"] = detect_build_from_head(next(iter(head_pieces)), settings, qc)
     vcf_path.parent.mkdir(parents=True, exist_ok=True)
     work = make_work_dir()
     try:
         started = time.perf_counter()
-        results = sorted(run_pieces(pieces, settings, lookup, fasta, work, workers), key=lambda r: r["part"])
+        results = sorted(run_pieces(pieces, settings, fasta, work, workers), key=lambda r: r["part"])
         wall = {"read_and_standardise_pieces": time.perf_counter() - started}
         qc["table_pieces"] = {"pieces": len(results), "rows_per_piece": chunk_rows or "all", "workers": workers}
         moments = merge_piece_qc(qc, results, record)
@@ -1419,13 +1363,13 @@ def provenance() -> dict[str, Any]:
 
 
 def standardise_with_fallback(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
-                              reference_root: str, lookup: pd.DataFrame, fasta: Any, qc: dict[str, Any], **options: Any) -> Path:
+                              reference_root: str, fasta: Any, qc: dict[str, Any], **options: Any) -> Path:
     """Standardise the staged file. A raw GWAS Catalog file that cannot be standardised (data or configuration error)
     falls back to the Catalog's harmonised file, from a fresh QC record; the fallback is recorded. Returns the file used."""
     base = {key: (list(value) if isinstance(value, list) else dict(value) if isinstance(value, dict) else value)
             for key, value in qc.items()}
     try:
-        standardise_table(raw_path, vcf_path, record, config, reference_root, lookup, fasta, qc, **options)
+        standardise_table(raw_path, vcf_path, record, config, reference_root, fasta, qc, **options)
         return raw_path
     except SystemExit as exc:
         metadata = record.get("metadata", {}) or {}
@@ -1439,7 +1383,7 @@ def standardise_with_fallback(raw_path: Path, vcf_path: Path, record: dict[str, 
         qc["gwas_catalog_fallback"] = {"raw_file": raw_path.name, "harmonised_file": harmonised.name, "exit_code": exc.code}
         qc["warnings"].append(f"the raw GWAS Catalog file {raw_path.name} could not be standardised (exit {exc.code}); "
                               f"used the harmonised file {harmonised.name} instead")
-        standardise_table(harmonised, vcf_path, record, config, reference_root, lookup, fasta, qc, **options)
+        standardise_table(harmonised, vcf_path, record, config, reference_root, fasta, qc, **options)
         return harmonised
 
 
@@ -1459,7 +1403,7 @@ def main() -> None:
     parser.add_argument("--force", default="false")
     parser.add_argument("--dry-run", default="false")
     parser.add_argument("--workers", type=int, default=int(os.environ.get("GWAS_WORKERS", "1") or 1),
-                        help="processes standardising pieces of a table in parallel (each holds its own reference lookup)")
+                        help="processes standardising pieces of a table in parallel")
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
 
@@ -1498,25 +1442,21 @@ def main() -> None:
                           "settings_hash": fingerprint, "provenance": provenance(), "reference_fills": {}}
     validate_config_keys(config, qc)
     population = config.get("reference_population") or ancestry_to_population(record.get("ancestry", ""))
-    _, freqs38, _ = grch38_references(args.reference_root, population)
-    if freqs38 is not None:
-        lookup, used = pd.DataFrame(columns=alleles.LOOKUP_COLUMNS), freqs38.population
-        qc["reference_frequencies"] = "1000 Genomes GRCh38 (2,504 unrelated phase 3 samples)"
-    else:
-        lookup, used = alleles.read_reference_lookup(args.reference_root, population)
-    qc["reference_population"], qc["reference_population_used"] = population, used
-    if not used:
-        qc["warnings"].append(f"no 1000 Genomes lookup found under {args.reference_root}; no rsID/EAF fills or strand checks")
-    elif used != population:
-        qc["warnings"].append(f"lookup for population {population} not found; used {used}")
-    if used and lookup.empty and freqs38 is None:
-        qc["warnings"].append(f"the {used} reference lookup is empty")
-    elif used and freqs38 is None and not alleles.lookup_has_alleles(lookup):
-        qc["warnings"].append("reference lookup lacks A1/A2/AF1; rebuild it with make_1000genomes_lookup_tables.py")
+    dbsnp, freqs38, paired = grch38_references(args.reference_root, population)
     fasta = alleles.Fasta.find(args.reference_root)
+    missing = [name for name, item in (("dbsnp/GRCh38", dbsnp), ("1000genomes/GRCh38", freqs38), ("build_detection", paired))
+               if item is None]
+    if missing:
+        raise config_error(f"GRCh38 references missing under {args.reference_root}: {', '.join(missing)}. Build them with "
+                           "bash src/reference_data/build_grch38_references.sh (or bash src/source.sh).")
+    used = freqs38.population
+    qc["reference_frequencies"] = "1000 Genomes GRCh38 (2,504 unrelated phase 3 samples)"
+    qc["reference_population"], qc["reference_population_used"] = population, used
+    if used != population:
+        qc["warnings"].append(f"1000 Genomes frequencies for population {population} not found; used {used}")
 
-    used_path = standardise_with_fallback(raw_path, standard_vcf, record, config, args.reference_root, lookup, fasta, qc,
-                                          population=population, population_used=used or population, workers=max(1, args.workers))
+    used_path = standardise_with_fallback(raw_path, standard_vcf, record, config, args.reference_root, fasta, qc,
+                                          population=population, population_used=used, workers=max(1, args.workers))
     record["raw_path"] = str(used_path)
     qc["coordinate_build"] = "GRCh38"
     qc["completed_at"] = utc_now()

@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import EXAMPLES, LocalHttpServer, run_script, write_stub
+from testlib import EXAMPLES, LocalHttpServer, example_reference, run_script, write_stub
 
 
 class StageSourceTests(unittest.TestCase):
@@ -28,7 +28,7 @@ class StageSourceTests(unittest.TestCase):
     def stage(self, row_json, *extra, env=None, check=True):
         out = self.tmp / "stage_record.json"
         proc = run_script("stage_source.py", "--row-json", row_json, "--config-root", self.tmp, "--reference-root",
-                          EXAMPLES / "reference", "--output", out, *extra, env=env, check=check)
+                          example_reference(), "--output", out, *extra, env=env, check=check)
         return proc, (json.loads(out.read_text(encoding="utf-8")) if out.exists() else None)
 
     def test_local_file_is_copied_and_refreshed_when_the_source_changes(self):

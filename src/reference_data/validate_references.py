@@ -1,62 +1,84 @@
 #!/usr/bin/env python3
-"""Check that the reference data GWASprocessing needs is present and in the current format.
+"""Check that the reference data GWASprocessing needs is present and complete.
 
 Usage: python3 src/reference_data/validate_references.py [--reference-root references]
 
-Required (exit 1 when missing): lookup tables for AFR, AMR, EAS, EUR, SAS and ALL with columns
-CHR, SNP, POS19, A1, A2, AF1, and the hg19ToHg38 chain. Recommended (reported as WARNING): the
-hg38ToHg19 chain, the rsID coordinate index and the GRCh38 FASTA.
+Required (exit 1 when missing): the GRCh38 and GRCh37 FASTAs with their .fai indexes, the hg19ToHg38 chain, the dbSNP
+GRCh38 index, the 1000 Genomes GRCh38 frequencies for AFR, AMR, EAS, EUR, SAS and ALL, and the build-detection sample.
+Recommended (reported as WARNING): the dbSNP merge map (without it, rsIDs that dbSNP has merged into another are not
+placed) and the hg38ToHg19 chain (needed only to rebuild the build-detection sample).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-import pandas as pd
-
 POPULATIONS = ["AFR", "AMR", "EAS", "EUR", "SAS", "ALL"]
-REQUIRED_COLUMNS = ["CHR", "SNP", "POS19", "A1", "A2", "AF1"]
+FREQUENCY_FILES = ("key.i64", "ref.u1", "alt.u1", "af.f4")
+DETECTION_FILES = [f"{build}.{kind}" for build in ("grch37", "grch38") for kind in ("key.i64", "ref.u1", "alt.u1")]
+BUILD_SCRIPT = "src/reference_data/build_grch38_references.sh"
 
 
-def check(root: Path) -> tuple[list[str], list[str]]:
+def nonempty(path: Path) -> bool:
+    return path.is_file() and path.stat().st_size > 0
+
+
+def check(root: Path) -> tuple[list[str], list[str], list[str]]:
+    """(errors, warnings, notes)."""
     errors: list[str] = []
     warnings: list[str] = []
-    lookup = root / "1000genomes" / "phase3" / "lookup"
-    for pop in POPULATIONS:
-        path = next((p for p in (lookup / f"{pop}.tsv.gz", lookup / f"{pop}.tsv") if p.exists()), None)
-        if path is None:
-            errors.append(f"missing lookup table {lookup / (pop + '.tsv.gz')}")
-            continue
-        columns = list(pd.read_csv(path, sep="\t", nrows=0).columns)
-        missing = [c for c in REQUIRED_COLUMNS if c not in columns]
-        if missing:
-            errors.append(f"{path} lacks {', '.join(missing)}; rebuild it with make_1000genomes_lookup_tables.py --force")
+    notes: list[str] = []
     genome = root / "genome"
-    if not (genome / "hg19ToHg38.over.chain.gz").exists():
+    for name in ("GRCh38.fa", "GRCh37.fa"):
+        if not nonempty(genome / name):
+            errors.append(f"missing {genome / name} (run download_fasta_and_chains.sh)")
+        elif not nonempty(genome / f"{name}.fai"):
+            errors.append(f"missing {genome / name}.fai (samtools faidx, or rerun download_fasta_and_chains.sh)")
+    if not nonempty(genome / "hg19ToHg38.over.chain.gz"):
         errors.append(f"missing {genome / 'hg19ToHg38.over.chain.gz'} (run download_fasta_and_chains.sh)")
-    if not (genome / "hg38ToHg19.over.chain.gz").exists():
-        warnings.append("hg38ToHg19 chain missing: GRCh38 inputs will have no POS19")
-    if not (root / "1000genomes" / "phase3" / "coordinates" / "rs.npy").exists():
-        warnings.append("rsID coordinate index missing: files without positions are limited to common SNPs "
-                        "(run make_1000genomes_lookup_tables.py)")
-    if not any((genome / name).exists() for name in ("GRCh38.fa", "GRCh38.fasta")):
-        warnings.append("GRCh38 FASTA missing: REF/ALT will not be aligned to the reference genome (run download_fasta_and_chains.sh)")
-    return errors, warnings
+    if not nonempty(genome / "hg38ToHg19.over.chain.gz"):
+        warnings.append("hg38ToHg19 chain missing: needed only to rebuild the build-detection sample")
+    dbsnp = root / "dbsnp" / "GRCh38"
+    if not (dbsnp / "meta.json").exists() or not nonempty(dbsnp / "rs.u32"):
+        errors.append(f"missing dbSNP GRCh38 index in {dbsnp} (run {BUILD_SCRIPT})")
+    else:
+        meta = json.loads((dbsnp / "meta.json").read_text(encoding="utf-8"))
+        notes.append(f"dbSNP build {meta.get('dbsnp_build', '?')}: {meta.get('rsids', 0):,} rsIDs")
+        if (dbsnp / "merged_meta.json").exists() and nonempty(dbsnp / "merged_from.u32"):
+            merged = json.loads((dbsnp / "merged_meta.json").read_text(encoding="utf-8"))
+            notes.append(f"dbSNP merge map: {merged.get('retired_rsids', 0):,} retired rsIDs")
+        else:
+            warnings.append(f"dbSNP merge map missing in {dbsnp}: rsIDs merged into another rsID will not be placed "
+                            f"(run build_dbsnp_merges.py, or {BUILD_SCRIPT})")
+    freqs = root / "1000genomes" / "GRCh38"
+    for pop in POPULATIONS:
+        missing = [kind for kind in FREQUENCY_FILES if not nonempty(freqs / f"{pop}.{kind}")]
+        if missing:
+            errors.append(f"missing 1000 Genomes GRCh38 {pop} frequencies ({', '.join(missing)}) in {freqs} (run {BUILD_SCRIPT})")
+    detection = root / "build_detection"
+    missing = [name for name in DETECTION_FILES if not nonempty(detection / name)]
+    if missing or not (detection / "meta.json").exists():
+        errors.append(f"missing build-detection sample in {detection} (run build_build_detection_sample.py)")
+    return errors, warnings, notes
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--reference-root", default="references")
     args = parser.parse_args()
-    errors, warnings = check(Path(args.reference_root))
-    for warning in warnings:
-        print(f"WARNING: {warning}")
+    errors, warnings, notes = check(Path(args.reference_root))
+    for line in notes:
+        print(f"OK: {line}")
+    for line in warnings:
+        print(f"WARNING: {line}")
+    for line in errors:
+        print(f"ERROR: {line}", file=sys.stderr)
     if errors:
-        print("Reference data incomplete:\n  " + "\n  ".join(errors), file=sys.stderr)
-        raise SystemExit(1)
-    print(f"Reference data OK under {args.reference_root}")
+        sys.exit(1)
+    print("Reference data complete.")
 
 
 if __name__ == "__main__":

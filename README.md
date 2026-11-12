@@ -9,8 +9,8 @@ Principles: GRCh38 only; the output reads like an OpenGWAS file (deliberate diff
 - `src/` contains the user-facing scripts: `src/source.sh` installs tools and builds the reference data, `src/standardise.sh` runs the workflow (`bash src/standardise.sh`, or `sbatch src/standardise.sh` from the repository root), and `src/reference_data/` holds the individual reference-data steps.
 - `pipeline/` contains the Nextflow workflow (`main.nf`), its profiles (`conf/`), the Python steps (`bin/`) and the test suite (`tests/`).
 - `manifests/` contains persistent input manifests and optional study YAML overrides.
-- `.env` lists every setting with `/WHERE/...` placeholder paths. It is tracked and stays fixed.
-- `server.env` holds your real settings. It is not tracked.
+- `.env.example` lists every setting with `/WHERE/...` placeholder paths. It is tracked and stays fixed.
+- `.env` holds your real settings. `src/source.sh` creates it from `.env.example`. It is not tracked.
 
 The data are large and stay outside the repository, in the folders the settings point to. Below, `references/`, `GWAS/` and `temp/` stand for those folders:
 
@@ -23,34 +23,31 @@ The data are large and stay outside the repository, in the folders the settings 
 
 ### 1: settings, tools and `references/`
 
-Create `server.env` in the repository root and set the paths in it, using the names in [.env](.env):
+All settings live in 1 untracked file, `.env`, in the repository root. Setup creates it: `bash src/source.sh` (or `bash src/source.sh --env-only` to create only the settings) copies [.env.example](.env.example) to `.env` and fills in the data paths and, as it installs them, the tool locations. The data paths default to folders under the repository, or under `~/GWASprocessing-data` when the repository is in a cloud-synced folder; set `GWAS_DATA_HOME` before running setup to put them elsewhere, or edit them in `.env` afterwards. Setup never changes a value already in `.env`, so it is safe to re-run.
+
+The only value to add by hand is your OpenGWAS token:
 
 ```bash
-GWAS_WORK_ROOT=/WHERE/THE/GWAS/FILES/GO
-GWAS_REFERENCE_ROOT=/WHERE/THE/REFERENCE/DATA/IS
-GWAS_REFERENCE_RAW_ROOT=/WHERE/THE/RAW/REFERENCE/DOWNLOADS/GO
-GWAS_TEMP_ROOT=/WHERE/THE/TEMP/FILES/GO
-GWAS_LOG_ROOT=/WHERE/THE/TEMP/FILES/GO/logs
-GWAS_NEXTFLOW_WORK=/WHERE/THE/TEMP/FILES/GO/nextflow_work
-GWAS_NEXTFLOW_LOG=/WHERE/THE/TEMP/FILES/GO/.nextflow.log
-GWAS_WORKERS=3
 OPENGWAS_JWT=your-token
 ```
 
-The scripts read `server.env` first and then `.env`, so `server.env` needs only the lines you change, and a run stops with a message while a path is still a placeholder. Variables already set in the environment, and command-line options, take precedence over both files. Do not edit `.env`: it stays fixed so that `git pull` always works, and new settings get a default in the scripts instead.
+Other settings to review in `.env`: `GWAS_REFERENCE_RAW_ROOT` (raw reference downloads; default `references/raw`) and `GWAS_WORKERS` (pieces of a table standardised at once under the local profile; about 2 GB of memory each).
+
+The scripts read only `.env`; `.env.example` is never read, so its placeholders cannot reach a run, and it stays fixed so that `git pull` always works. Variables already set in the environment, and command-line options, take precedence over `.env`, and a run stops with a message while a path is still a `/WHERE/...` placeholder. A checkout set up before `.env` existed still has its settings in `server.env`: the scripts read it with a warning, and `bash src/source.sh --env-only` moves its values into `.env`, after which `server.env` can be deleted.
 
 Keep `GWAS_REFERENCE_ROOT`, `GWAS_WORK_ROOT`, `GWAS_TEMP_ROOT` and `GWAS_NEXTFLOW_WORK` on local or scratch storage: the built references are read at random positions on every run, which is about 100 times slower from a USB drive, and in a cloud-synced folder (OneDrive, Dropbox, iCloud) every output is uploaded; `src/standardise.sh` warns when it detects this. `GWAS_REFERENCE_RAW_ROOT` can be on a slow or external drive: the raw downloads are read once, start to finish, while the references are built.
 
-OpenGWAS sources require authentication. Set `OPENGWAS_JWT` in `server.env` to a valid token (generate or renew one at [https://api.opengwas.io/profile/](https://api.opengwas.io/profile/)). If the token is missing or rejected, the run stops with exit code 78. Manifests without OpenGWAS sources do not need a token.
+OpenGWAS sources require authentication. Set `OPENGWAS_JWT` in `.env` to a valid token (generate or renew one at [https://api.opengwas.io/profile/](https://api.opengwas.io/profile/)). If the token is missing or rejected, the run stops with exit code 78. Manifests without OpenGWAS sources do not need a token.
 
-Run `bash src/source.sh` to install the tools (plink2, Nextflow, bgzip/tabix, the Python packages, and bcftools built with the BCFtools/liftover plugin) and build the reference data end to end. This is the recommended way to set up the project on a new machine, including a cluster. It is idempotent: every step skips work whose output already exists, so it is safe to re-run, including after an interrupted run. Tool locations are written to `server.env` (`PLINK2`, `NEXTFLOW`, `GWAS_VENV`, `GWAS_BCFTOOLS`, `BCFTOOLS_PLUGINS`). If bcftools with the liftover plugin cannot be built, setup continues with a warning and GRCh37 inputs are lifted with pyliftover (positions only).
+Run `bash src/source.sh` to install the tools (plink2, Nextflow, bgzip/tabix, the Python packages, and bcftools built with the BCFtools/liftover plugin) and build the reference data end to end. This is the recommended way to set up the project on a new machine, including a cluster. It is idempotent: every step skips work whose output already exists, so it is safe to re-run, including after an interrupted run. Tool locations are written to `.env` (`PLINK2`, `NEXTFLOW`, `GWAS_VENV`, `GWAS_BCFTOOLS`, `BCFTOOLS_PLUGINS`). bcftools with the liftover plugin is required: if it cannot be built (it needs a C compiler, make and zlib), setup stops with an error; set `GWAS_BCFTOOLS` and `BCFTOOLS_PLUGINS` in `.env` to use an existing build.
 
 ```bash
 bash src/source.sh                  # install tools, then build all reference data
 bash src/source.sh --tools-only     # only install/verify tools and Python packages
 bash src/source.sh --reference-only # only build/download reference data (tools must already exist)
 bash src/source.sh --r-packages     # only the R packages for the R audit test (gwasvcf)
-bash src/source.sh --force          # rebuild lookup tables and the rsID coordinate index
+bash src/source.sh --env-only       # only create or complete .env
+bash src/source.sh --force          # rebuild the built references (dbSNP index and merge map, 1000 Genomes, build sample)
 ```
 
 The reference build downloads about 41 GB (dbSNP 30 GB and its 0.8 GB merge history, 1000 Genomes about 8 GB, 2 FASTAs 2 GB) and builds about 30 GB of lookups. The built references are:
@@ -59,13 +56,12 @@ The reference build downloads about 41 GB (dbSNP 30 GB and its 0.8 GB merge hist
 |---|---|---|
 | `genome/GRCh38.fa` (+ `.fai`) | GRCh38 primary assembly: REF check, alignment, indel normalisation, liftover target | Ensembl release 113 |
 | `genome/GRCh37.fa` (+ `.fai`) | GRCh37 primary assembly: source genome for BCFtools/liftover only | Ensembl GRCh37 release 113 |
-| `genome/hg19ToHg38.over.chain.gz` | UCSC liftover chain | UCSC |
+| `genome/hg19ToHg38.over.chain.gz`, `hg38ToHg19.over.chain.gz` | UCSC liftover chains: GRCh37 inputs to GRCh38, and the build-detection sample to GRCh37 (reference build only) | UCSC |
 | `dbsnp/GRCh38/` | rsID-sorted positions (for inputs with rsIDs and no positions) and position-sorted rsIDs with allele hashes (for the ID column), memory-mapped; a merge map from 21.6M retired rsIDs to the current rsID they were merged into | NCBI dbSNP build 157 (`GCF_000001405.40`) and its merge history (`refsnp-merged.json.bz2`) |
 | `1000genomes/GRCh38/` | ALT-allele frequencies of SNVs per super-population (AFR, AMR, EAS, EUR, SAS, ALL), keyed on GRCh38 position, for the 2,504 unrelated phase 3 samples: palindromic strand, AF fill, frequency check | 1000 Genomes 30x GRCh38 (Byrska-Bishop et al. 2022), plink2 resources |
-| `build_detection/` | The same common SNPs placed in GRCh37 and GRCh38, for build detection | 1000 Genomes phase 3 EUR lookup placed in GRCh38 by dbSNP |
-| `1000genomes/phase3/` | GRCh37 lookup and rsID index used when the GRCh38 references above are not installed | 1000 Genomes phase 3 |
+| `build_detection/` | 2 million common biallelic SNPs placed in GRCh37 and GRCh38, for build detection | 1000 Genomes GRCh38 EUR (frequency 0.05–0.95), fixed-seed sample lifted to GRCh37 with BCFtools/liftover |
 
-`python3 src/reference_data/validate_references.py --reference-root /WHERE/THE/REFERENCE/DATA/IS` reports anything missing or in an outdated format.
+`python3 src/reference_data/validate_references.py --reference-root /WHERE/THE/REFERENCE/DATA/IS` reports anything missing. Every reference above is required except the dbSNP merge map and the hg38ToHg19 chain; a row stops with exit code 78 when the dbSNP index, the 1000 Genomes frequencies or the build-detection sample is missing, and a GRCh37 input stops when BCFtools/liftover, either FASTA or the hg19ToHg38 chain is missing.
 
 ### 2: manifest
 
@@ -160,7 +156,7 @@ The build is detected from the data in every case. A fixed-seed sample of up to 
 ## Coordinates and liftover
 
 - rsIDs without positions: the GRCh38 chromosome and position come straight from dbSNP build 157, so no liftover is involved. rsIDs at more than 1 position in dbSNP are not used. An rsID that dbSNP has retired by merging it into another (rs12016871 into rs9581854 in build 131) takes the position of the current rsID (21.6M retired rsIDs are mapped): INFO/SNPID keeps the study's rsID, and the ID column carries the current one, since it is matched on position and alleles. The step log counts these. Without the merge map (`src/reference_data/build_dbsnp_merges.py`) such rows are removed and a warning says so.
-- GRCh37 positions are lifted with BCFtools/liftover (Genovese et al. 2024, [BCFtools/liftover: an accurate and comprehensive tool to convert genetic variants across genome assemblies](https://doi.org/10.1093/bioinformatics/btae038)), which drops fewer variants than position-only tools, handles indels, and swaps alleles where the reference allele changed between builds. Alleles are first oriented to the GRCh37 FASTA (REF must match the source genome), then lifted with both FASTAs and the UCSC chain; the effect allele is followed through allele swaps and minus-strand blocks. Variants that cannot be lifted are counted by the tool's reason, and so are variants whose alleles do not match GRCh37 and those where GRCh38 has a third allele. Without the plugin or the GRCh37 FASTA, pyliftover lifts positions only.
+- GRCh37 positions are lifted with BCFtools/liftover (Genovese et al. 2024, [BCFtools/liftover: an accurate and comprehensive tool to convert genetic variants across genome assemblies](https://doi.org/10.1093/bioinformatics/btae038)), which drops fewer variants than position-only tools, handles indels, and swaps alleles where the reference allele changed between builds. Alleles are first oriented to the GRCh37 FASTA (REF must match the source genome), then lifted with both FASTAs and the UCSC chain; the effect allele is followed through allele swaps and minus-strand blocks. Variants that cannot be lifted are counted by the tool's reason, and so are variants whose alleles do not match GRCh37 and those where GRCh38 has a third allele. When the alleles end up on the other strand from the study's (reported on the reverse strand of GRCh37, or lifted across a minus-strand chain block, but not both), `INFO/HM` says `complemented`.
 
 ## Reference alignment
 
@@ -206,7 +202,7 @@ The VCF follows GWAS-VCF specification 1.0.0 as gwas2vcf writes it, so R gwasvcf
 | `ALT` | effect allele; 1 row per allele, no multi-allelic rows |
 | `QUAL`, `FILTER` | `.`, `PASS` |
 | `INFO/SNPID` | the study's own variant identifier |
-| `INFO/HM` | harmonisation action: `forward`, `swapped`, `complemented`, `complemented_swapped`, `unverified` (no reference sequence at the position), or for palindromic SNPs `palindrome_forward`, `palindrome_complemented`, `palindrome_ambiguous`, each with `_swapped` when the alleles were then swapped |
+| `INFO/HM` | what was done to the study's alleles: `forward` (as reported), `swapped` (effect allele was the GRCh38 reference base: ES negated, AF to 1 − AF), `complemented` (alleles on the other strand from the study's, whether from the study's reporting strand or a minus-strand liftover), `complemented_swapped`, `unverified` (no reference sequence at the position), or for palindromic SNPs `palindrome_forward`, `palindrome_complemented`, `palindrome_ambiguous`, each with `_swapped` when the alleles were then swapped |
 | `FORMAT/ES`, `SE` | effect size relative to ALT (log OR for binary traits), its standard error |
 | `FORMAT/LP` | −log10 P; recover `P = 10^(−LP)` |
 | `FORMAT/AF` | ALT frequency: study-reported, else the 1000 Genomes frequency of the matched population |
@@ -234,7 +230,7 @@ The step log is always written to the QC JSON and printed to the task log. With 
 python3 pipeline/bin/report.py --dir GWAS/<STUDYID>/standardise/<SOURCE_ID>
 ```
 
-QC flags follow the OpenGWAS report thresholds and never stop a row: absolute frequency correlation with 1000 Genomes below 0.7, lambda GC above 1.2, maximum sample size below 10,000, absolute mean effect above 0.5 or 0.1, more than 1,000 variants at P < 5e-8. The LDSC and clumping flags are not computed yet.
+QC flags follow the OpenGWAS report thresholds and never stop a row: absolute frequency correlation with 1000 Genomes below 0.7, lambda GC above 1.2, maximum sample size below 10,000, absolute mean effect above 0.5 or 0.1, more than 1,000 variants at P < 5e-8. The OpenGWAS LDSC and clumping flags are not part of this pipeline, because it runs neither.
 
 ## Conversion
 
@@ -272,16 +268,16 @@ The suite reads its small synthetic example data from `pipeline/tests/examples/`
 |---|---|
 | `test_common.py` | delimiter detection, table reading, identifiers, ancestry and build labels, atomic state and JSON writes |
 | `test_stats.py` | −log10 P from P, LOG10P and z-scores; genomic inflation |
-| `test_coordinates.py` | pyliftover outcomes, build detection, variant-ID parsing, rsID coordinate index |
+| `test_coordinates.py` | build detection from the paired sample, variant-ID parsing, rsID numbers |
 | `test_alleles.py` | annotation, EAF fill, palindromic resolution, de-duplication, frequency concordance, FASTA access, alignment and indel normalisation |
 | `test_vcf.py` | GWAS-VCF 1.0.0 header, `##SAMPLE`/`##META`, body formatting, chromosome order, bgzip/tabix validated with `bcftools` |
 | `test_standardise_table.py`, `test_standardise_passthrough.py` | end-to-end standardisation of tables and GWAS-VCFs |
 | `test_standardise_pieces.py` | pieces and workers give the same output; the step log and `##SAMPLE` counts add up |
-| `test_grch38_references.py` | dbSNP positions and rsIDs, 1000 Genomes GRCh38 frequencies, build detection, BCFtools/liftover |
+| `test_grch38_references.py` | dbSNP positions, rsIDs and merged rsIDs, 1000 Genomes GRCh38 frequencies, build detection, BCFtools/liftover and the strand recorded in `INFO/HM` |
 | `test_prepare_manifest.py`, `test_stage_source.py`, `test_update_state.py` | manifest validation and skipping, staging routes, state updates |
 | `test_downloads.py` | `download_url`, GWAS Catalog (raw first, harmonised fallback) and OpenGWAS clients |
 | `test_report.py` | −log10 P extraction, QQ thinning, the HTML report and its regeneration |
-| `test_reference_data.py` | lookup and coordinate-index builders, reference validation |
+| `test_reference_data.py` | dbSNP merge map and build-detection sample builders, reference validation |
 | `test_shell_scripts.py` | `src/standardise.sh`, `src/source.sh` and the reference-data shell scripts |
 | `test_audit.py` | Python and R (`gwasvcf`) readers on pipeline output |
 | `test_nextflow_integration.py` | the real workflow via `src/standardise.sh`: failures, skipping and settings-driven reruns |

@@ -1,134 +1,96 @@
-"""Tests for src/reference_data: lookup-table builder, rsID coordinate index builder and validator."""
+"""Tests for src/reference_data: the reference validator, the dbSNP merge map builder and the build-detection
+sample builder."""
 
-import shutil
+import json
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
-import pandas as pd
+import numpy as np
 
-from testlib import SRC, write_chain, write_fasta, write_lookup
+from testlib import (SRC, bcftools_liftover_available, write_chain, write_genomes, write_grch38_references,
+                     write_offset_chains)
 
-import gwas_coordinates as coords
+import gwas_alleles as alleles
 
-POPULATIONS = ["AFR", "AMR", "EAS", "EUR", "SAS", "ALL"]
-BUILDER = SRC / "reference_data" / "make_1000genomes_lookup_tables.py"
+POPULATIONS = ("AFR", "AMR", "EAS", "EUR", "SAS", "ALL")
 VALIDATOR = SRC / "reference_data" / "validate_references.py"
+DETECTION_BUILDER = SRC / "reference_data" / "build_build_detection_sample.py"
 
 
 def run(script, *args):
     return subprocess.run([sys.executable, str(script), *map(str, args)], capture_output=True, text=True, timeout=300)
 
 
-class LookupBuilderTests(unittest.TestCase):
-    def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
-        self.processed = self.root / "1000genomes" / "phase3" / "processed"
-        for pop in POPULATIONS:
-            folder = self.processed / pop
-            folder.mkdir(parents=True)
-            (folder / f"{pop}.bim").write_text("1\trs1\t0\t1000\tA\tG\nX\trs2\t0\t500\tT\tC\n", encoding="utf-8")
-            self.write_afreq(pop, 0.8)
-
-    def write_afreq(self, pop, af):
-        (self.processed / pop / "stats.afreq").write_text(
-            f"#CHROM\tID\tREF\tALT\tALT_FREQS\tOBS_CT\n1\trs1\tG\tA\t{af}\t1000\nX\trs2\tC\tT\t0.1\t900\n", encoding="utf-8")
-
-    def lookup(self, pop="EUR"):
-        return pd.read_csv(self.root / "1000genomes" / "phase3" / "lookup" / f"{pop}.tsv.gz", sep="\t", dtype={"CHR": str})
-
-    def test_lookup_records_alleles_and_the_frequency_of_a1(self):
-        proc = run(BUILDER, "--reference-root", self.root, "--skip-coordinates")
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        table = self.lookup()
-        self.assertEqual(list(table.columns), ["CHR", "SNP", "POS19", "A1", "A2", "AF1"])
-        self.assertEqual(table.iloc[0].tolist(), ["1", "rs1", 1000, "A", "G", 0.8])
-        self.assertEqual(table.iloc[1].tolist(), ["X", "rs2", 500, "T", "C", 0.1])
-
-    def test_existing_tables_are_kept_unless_forced(self):
-        run(BUILDER, "--reference-root", self.root, "--skip-coordinates")
-        self.write_afreq("EUR", 0.6)
-        run(BUILDER, "--reference-root", self.root, "--skip-coordinates")
-        self.assertEqual(self.lookup()["AF1"].iloc[0], 0.8)
-        run(BUILDER, "--reference-root", self.root, "--skip-coordinates", "--force")
-        self.assertEqual(self.lookup()["AF1"].iloc[0], 0.6)
-
-    def pvar_text(self):
-        return ("##fileformat=PVARv1.0\n##contig=<ID=1>\n#CHROM\tPOS\tID\tREF\tALT\n"
-                "1\t1000\trs1\tA\tG\nX\t500\trs99\tC\tT\n2\t300\t.\tA\tC\n3\t10\trs7\tA\tG\n4\t20\trs7\tA\tG\n")
-
-    def check_index(self):
-        index = coords.CoordinateIndex.load(self.root / "1000genomes" / "phase3" / "coordinates")
-        found = index.lookup(pd.Series(["rs1", "rs99", "rs7"]))
-        self.assertEqual(found["CHR"].tolist()[:2], ["1", "X"])
-        self.assertEqual(found["POS19"].tolist()[:2], [1000, 500])
-        self.assertTrue(pd.isna(found["CHR"].iloc[2]), "an rsID at two positions must not be used")
-
-    def test_coordinate_index_is_built_from_the_decompressed_variant_list(self):
-        (self.processed / "all_phase3.pvar").write_text(self.pvar_text(), encoding="utf-8")
-        proc = run(BUILDER, "--reference-root", self.root)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.check_index()
-
-    @unittest.skipUnless(shutil.which("zstd"), "zstd is required")
-    def test_coordinate_index_is_built_from_the_compressed_raw_variant_list(self):
-        raw = self.root / "1000genomes" / "phase3" / "raw"
-        raw.mkdir(parents=True)
-        (raw / "all_phase3.pvar").write_text(self.pvar_text(), encoding="utf-8")
-        subprocess.run(["zstd", "-q", "--rm", str(raw / "all_phase3.pvar")], check=True)
-        proc = run(BUILDER, "--reference-root", self.root)
-        self.assertEqual(proc.returncode, 0, proc.stderr)
-        self.check_index()
-
-
 class ValidatorTests(unittest.TestCase):
     def setUp(self):
         self.root = Path(tempfile.mkdtemp())
 
-    def complete_lookups(self, columns=None, rows=None):
-        for pop in POPULATIONS:
-            write_lookup(self.root, rows or [("1", "rs1", 1000, "A", "G", 0.2)], population=pop, columns=columns)
+    def complete(self):
+        write_grch38_references(self.root, [("1", 1100, 1, "G", "A", 0.2)], populations=POPULATIONS,
+                                paired=[("1", 1000, 1100, "G", "A")])
+        write_genomes(self.root / "genome", [("1", 1000, "G")])
+        for name in ("GRCh38.fa", "GRCh37.fa"):
+            alleles.Fasta(self.root / "genome" / name)  # writes the .fai
+        write_chain(self.root / "genome" / "hg19ToHg38.over.chain.gz", [])
 
     def test_empty_reference_root_fails_listing_what_is_missing(self):
         proc = run(VALIDATOR, "--reference-root", self.root)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("lookup", proc.stdout + proc.stderr)
-        self.assertIn("hg19ToHg38", proc.stdout + proc.stderr)
+        for item in ("GRCh38.fa", "GRCh37.fa", "hg19ToHg38", "dbSNP GRCh38 index", "1000 Genomes GRCh38 EUR", "build-detection"):
+            self.assertIn(item, proc.stderr)
 
-    def test_lookups_without_directional_frequencies_fail(self):
-        self.complete_lookups(columns=["CHR", "SNP", "SNPID", "POS19", "POS38", "EAF_ALL"], rows=[("1", "rs1", "1:1000", 1000, 1000, 0.2)])
-        write_chain(self.root / "genome" / "hg19ToHg38.over.chain.gz", [])
+    def test_a_missing_population_fails(self):
+        self.complete()
+        (self.root / "1000genomes" / "GRCh38" / "AFR.af.f4").unlink()
         proc = run(VALIDATOR, "--reference-root", self.root)
         self.assertEqual(proc.returncode, 1)
-        self.assertIn("A1, A2, AF1", proc.stdout + proc.stderr)
+        self.assertIn("AFR frequencies (af.f4)", proc.stderr)
 
     def test_complete_references_pass_and_optional_items_are_reported(self):
-        self.complete_lookups()
-        write_chain(self.root / "genome" / "hg19ToHg38.over.chain.gz", [])
+        self.complete()
         proc = run(VALIDATOR, "--reference-root", self.root)
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
-        self.assertIn("coordinate index", proc.stdout)
-        self.assertIn("FASTA", proc.stdout)
-        write_fasta(self.root / "genome", {"1": "ACGT"})
-        coords.write_coordinate_index(self.root / "1000genomes" / "phase3" / "coordinates", rs=[1], chrom=["1"], pos=[1000])
+        self.assertIn("merge map missing", proc.stdout)
+        self.assertIn("hg38ToHg19", proc.stdout)
+        write_grch38_references(self.root, [("1", 1100, 1, "G", "A", 0.2)], populations=POPULATIONS,
+                                paired=[("1", 1000, 1100, "G", "A")], merges={7: 1})
+        (self.root / "dbsnp" / "GRCh38" / "merged_meta.json").write_text(json.dumps({"retired_rsids": 1}), encoding="utf-8")
         write_chain(self.root / "genome" / "hg38ToHg19.over.chain.gz", [])
         proc = run(VALIDATOR, "--reference-root", self.root)
         self.assertEqual(proc.returncode, 0)
         self.assertNotIn("WARNING", proc.stdout)
+        self.assertIn("1 retired rsIDs", proc.stdout)
 
 
-if __name__ == "__main__":
-    unittest.main()
+@unittest.skipUnless(bcftools_liftover_available(), "bcftools with the +liftover plugin is required (GWAS_BCFTOOLS, BCFTOOLS_PLUGINS)")
+class BuildDetectionSampleTests(unittest.TestCase):
+    def test_common_grch38_snps_are_placed_in_grch37_by_liftover(self):
+        root = Path(tempfile.mkdtemp())
+        rng = np.random.default_rng(821)
+        genome37 = "".join(rng.choice(list("ACGT"), size=6000))
+        sites = [(1000 + 50 * i, genome37[999 + 50 * i]) for i in range(40)]  # GRCh37 position, REF
+        alt = {"A": "G", "C": "T", "G": "A", "T": "C"}
+        variants = [("1", p + 100, 0, ref, alt[ref], 0.02 if i < 5 else 0.3) for i, (p, ref) in enumerate(sites)]  # 5 rare
+        write_grch38_references(root, variants, populations=("EUR",))
+        write_offset_chains(root / "genome")
+        write_genomes(root / "genome", [("1", p, ref) for p, ref in sites])
+        proc = run(DETECTION_BUILDER, "--reference-root", root, "--size", "30", "--force")  # the fixture wrote an empty sample
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        meta = json.loads((root / "build_detection" / "meta.json").read_text(encoding="utf-8"))
+        self.assertEqual((meta["snps"], meta["common_candidates"]), (30, 35))
+        key37 = np.fromfile(root / "build_detection" / "grch37.key.i64", dtype="<i8")
+        key38 = np.fromfile(root / "build_detection" / "grch38.key.i64", dtype="<i8")
+        np.testing.assert_array_equal(key38 - key37, 100)
+        np.testing.assert_array_equal(np.fromfile(root / "build_detection" / "grch37.ref.u1", dtype="u1"),
+                                      np.fromfile(root / "build_detection" / "grch38.ref.u1", dtype="u1"))
 
 
 class DbsnpMergeBuilderTests(unittest.TestCase):
     def test_retired_rsids_map_to_the_end_of_their_merge_chain(self):
         import bz2
-        import json
-
-        import numpy as np
 
         root = Path(tempfile.mkdtemp())
         records = [
@@ -153,3 +115,7 @@ class DbsnpMergeBuilderTests(unittest.TestCase):
         meta = json.loads((out / "merged_meta.json").read_text())
         self.assertEqual((meta["retired_rsids"], meta["retired_with_more_than_one_target"]), (7, 1))
         self.assertEqual((meta["retired_with_conflicting_targets"], meta["earlier_merge_disagreeing_with_own_record"]), (1, 0))
+
+
+if __name__ == "__main__":
+    unittest.main()

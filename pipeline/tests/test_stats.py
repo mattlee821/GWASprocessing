@@ -11,6 +11,8 @@ import numpy as np
 
 import testlib  # noqa: F401  (puts pipeline/bin on sys.path)
 
+assert testlib.BIN.is_dir()
+
 import gwas_stats
 
 

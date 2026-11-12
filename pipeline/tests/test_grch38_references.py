@@ -3,18 +3,16 @@
 The fixture genome is seeded (821). testlib's offset chains place GRCh38 at GRCh37 + 100 on chromosomes 1 and 2.
 """
 
-import os
-import shutil
-import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
-from testlib import make_reference, run_standardise, write_fasta, write_grch38_references, write_table  # noqa: I001
+from testlib import chain_block, make_reference, needs_liftover, run_standardise, write_chain, write_fasta, write_grch38_references, write_table  # noqa: I001
 
 import gwas_reference
+from standardise_gwas import harmonisation_action
 
 OFFSET = 100
 HEADER = ["SNP", "EA", "OA", "EAF", "BETA", "SE", "P", "N"]
@@ -30,19 +28,12 @@ def fixture(root: Path, n: int = 30):
         alt = next(b for b in "ACGT" if b not in (ref, {"A": "T", "C": "G", "G": "C", "T": "A"}[ref]))
         variants.append(("1", pos38, 5000 + i, ref, alt, 0.3))
     reference = make_reference(root / "reference", lookup_rows=[], fasta={"1": genome, "2": genome})
+    write_fasta(reference / "genome", {"1": genome[OFFSET:], "2": genome[OFFSET:]}, name="GRCh37.fa")  # GRCh38 = GRCh37 + 100
     write_grch38_references(reference, variants, paired=[(v[0], v[1] - OFFSET, v[1], v[3], v[4]) for v in variants])
     return reference, variants
 
 
-def bcftools_liftover_available() -> bool:
-    tool = os.environ.get("GWAS_BCFTOOLS") or shutil.which("bcftools")
-    if not tool:
-        return False
-    listed = subprocess.run([tool, "plugin", "-l"], capture_output=True, text=True).stdout
-    return "liftover" in listed.split()
-
-
-@unittest.skipUnless(bcftools_liftover_available(), "bcftools with the +liftover plugin is required (GWAS_BCFTOOLS, BCFTOOLS_PLUGINS)")
+@needs_liftover
 class BcftoolsLiftoverTests(unittest.TestCase):
     def test_grch37_inputs_are_lifted_with_the_effect_allele_kept_through_a_reference_change(self):
         tmp = Path(tempfile.mkdtemp())
@@ -109,6 +100,7 @@ class Grch38ReferenceTests(unittest.TestCase):
         self.assertEqual(result.qc["reference_fills"]["POS38_merged_rsid"], 3)
         self.assertEqual(result.qc["incomplete_by_cause"]["rsid_not_in_coordinate_index"]["rows"], 1)
 
+    @needs_liftover
     def test_ids_come_from_dbsnp_matched_on_position_and_alleles(self):
         header = ["CHR", "POS", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P"]
         rows = [[1, v[1] - OFFSET, f"1:{v[1] - OFFSET}", v[4], v[3], 0.3, 0.1, 0.02, 1e-6] for v in self.variants]
@@ -122,6 +114,7 @@ class Grch38ReferenceTests(unittest.TestCase):
         self.assertEqual((by_pos[wrong[1]]["ID"], by_pos[wrong[1]]["INFO"]["SNPID"]), (".", "rs5003"))
         self.assertEqual((result.qc["rsid_dbsnp"]["matched"], result.qc["rsid_dbsnp"]["unmatched"]), (29, 1))
 
+    @needs_liftover
     def test_build_is_detected_from_the_paired_sample(self):
         header = ["CHR", "POS", "EA", "OA", "EAF", "BETA", "SE", "P"]
         grch37 = [[1, v[1] - OFFSET, v[4], v[3], 0.3, 0.1, 0.02, 1e-6] for v in self.variants]
@@ -141,6 +134,92 @@ class Grch38ReferenceTests(unittest.TestCase):
         # The hash is written into the dbSNP index; a change would silently break every rsID match.
         self.assertEqual(gwas_reference.allele_hash(["A", "AT"], ["G", "A"]).tolist(), gwas_reference.allele_hash(["a", "AT"], ["g", "A"]).tolist())
         self.assertNotEqual(gwas_reference.allele_hash(["A"], ["G"])[0], gwas_reference.allele_hash(["G"], ["A"])[0])
+
+
+COMPLEMENT = {"A": "T", "C": "G", "G": "C", "T": "A"}
+
+
+class HarmonisationActionTests(unittest.TestCase):
+    def test_hm_is_relative_to_the_alleles_the_study_reported(self):
+        pal = np.array(["", "", "", "", "", "", "", "forward", "forward", "complemented", "ambiguous"], dtype=object)
+        action = np.array(["keep", "complement", "keep", "swap", "complement", "drop", "indel_unmatched", "keep", "swap", "keep",
+                           "keep"], dtype=object)
+        # strand_changed: liftover already complemented the alleles (orientation to GRCh37 or a minus-strand chain block)
+        changed = np.array([False, False, True, True, True, False, False, False, True, True, True])
+        self.assertEqual(harmonisation_action(pal, action, changed).tolist(), [
+            "forward", "complemented", "complemented", "complemented_swapped", "forward", "dropped", "unverified",
+            "palindrome_forward", "palindrome_complemented_swapped", "palindrome_forward", "palindrome_ambiguous"])
+
+    def test_without_liftover_hm_follows_the_alignment_alone(self):
+        self.assertEqual(harmonisation_action(np.array(["", ""], dtype=object), np.array(["complement_swap", "swap"], dtype=object)).tolist(),
+                         ["complemented_swapped", "swapped"])
+
+
+@needs_liftover
+class LiftoverStrandTests(unittest.TestCase):
+    """INFO/HM records a strand change made during liftover: GRCh37 chr1 [1000, 2000) maps to the minus strand of GRCh38
+    chr1, so GRCh37 position 1501 is GRCh38 position 2000 and its alleles are complemented."""
+
+    SITE37, SITE38 = 1501, 2000
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        rng = np.random.default_rng(821)
+        self.genome37 = list("".join(rng.choice(list("ACGT"), size=3000)))
+        genome38 = list("".join(rng.choice(list("ACGT"), size=3000)))
+        for o in range(1000):
+            genome38[3000 - 1 - (500 + o)] = COMPLEMENT[self.genome37[1000 + o]]
+        self.genome38 = genome38
+        self.reference = make_reference(self.tmp / "reference", lookup_rows=[], offset_chains=False)
+        write_chain(self.reference / "genome" / "hg19ToHg38.over.chain.gz",
+                    [chain_block("chr1", "chr1", 3000, 3000, 1000, 1000, 500, 1, dst_strand="-"),
+                     chain_block("chr2", "chr2", 3000, 3100, 0, 2900, 100, 2)])
+        self.genome37_2 = "".join(rng.choice(list("ACGT"), size=3000))
+        self.genome38_2 = "".join(rng.choice(list("ACGT"), size=100)) + self.genome37_2
+
+    def write_genomes(self):
+        write_fasta(self.reference / "genome", {"1": "".join(self.genome37), "2": self.genome37_2}, name="GRCh37.fa")
+        write_fasta(self.reference / "genome", {"1": "".join(self.genome38), "2": self.genome38_2}, name="GRCh38.fa")
+
+    def run_rows(self, rows, name):
+        header = ["CHR", "POS", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P"]
+        result = run_standardise(self.tmp, write_table(self.tmp / f"{name}.tsv", header, rows), self.reference, input_build="hg19",
+                                 ancestry="EUR", name=name)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.by_snpid()
+
+    def test_a_minus_strand_block_complements_and_hm_says_so(self):
+        self.write_genomes()
+        ref = self.genome37[self.SITE37 - 1]
+        alt = next(b for b in "ACGT" if b not in (ref, COMPLEMENT[ref]))
+        row = self.run_rows([[1, self.SITE37, "rs1", alt, ref, 0.3, 0.1, 0.02, 1e-6]], "minus")["rs1"]
+        self.assertEqual((row["POS"], row["REF"], row["ALT"], row["FORMAT"]["ES"]), (self.SITE38, COMPLEMENT[ref], COMPLEMENT[alt], "0.1"))
+        self.assertEqual(row["INFO"]["HM"], "complemented")
+
+    def test_a_reverse_strand_report_lifted_on_a_plus_block_reads_complemented(self):
+        self.write_genomes()
+        ref = self.genome37_2[999]
+        alt = next(b for b in "ACGT" if b not in (ref, COMPLEMENT[ref]))
+        row = self.run_rows([[2, 1000, "rs2", COMPLEMENT[alt], COMPLEMENT[ref], 0.3, 0.1, 0.02, 1e-6]], "plus")["rs2"]
+        self.assertEqual((row["POS"], row["REF"], row["ALT"], row["INFO"]["HM"]), (1100, ref, alt, "complemented"))
+
+    def test_a_reverse_strand_report_on_a_minus_block_cancels_to_forward(self):
+        self.write_genomes()
+        ref = self.genome37[self.SITE37 - 1]
+        alt = next(b for b in "ACGT" if b not in (ref, COMPLEMENT[ref]))
+        row = self.run_rows([[1, self.SITE37, "rs3", COMPLEMENT[alt], COMPLEMENT[ref], 0.3, 0.1, 0.02, 1e-6]], "both")["rs3"]
+        self.assertEqual((row["REF"], row["ALT"], row["INFO"]["HM"]), (COMPLEMENT[ref], COMPLEMENT[alt], "forward"))
+
+    def test_a_palindrome_resolved_after_a_minus_strand_liftover_reads_complemented(self):
+        self.genome37[self.SITE37 - 1] = "A"
+        self.genome38[self.SITE38 - 1] = "T"
+        self.write_genomes()
+        # 1000 Genomes on GRCh38: REF T, ALT A at frequency 0.8, so T (the complement of the study's A) has 0.2
+        write_grch38_references(self.reference, [("1", self.SITE38, 0, "T", "A", 0.8)])
+        row = self.run_rows([[1, self.SITE37, "rs4", "A", "T", 0.2, 0.1, 0.02, 1e-6]], "palindrome")["rs4"]
+        self.assertEqual((row["POS"], row["REF"], row["ALT"]), (self.SITE38, "T", "A"))
+        self.assertEqual(row["INFO"]["HM"], "palindrome_complemented_swapped")
+        self.assertEqual(row["FORMAT"]["ES"], "-0.1")  # the study's A is GRCh38 T, the reference base
 
 
 if __name__ == "__main__":

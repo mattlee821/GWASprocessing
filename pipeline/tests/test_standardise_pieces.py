@@ -1,11 +1,13 @@
 """Tables standardised in pieces (GWAS_TABLE_CHUNK) and in parallel (GWAS_WORKERS) must give the same output as
 the whole table: same VCF records in the same order, the same QC counts and the same step log. Also covers the
-step log's reconciliation (every removed row accounted for once) and the prepared-lookup cache.
+step log's reconciliation (every removed row accounted for once). GRCh37 inputs are lifted with BCFtools/liftover, so
+these tests need bcftools with the +liftover plugin.
 
 The synthetic table is seeded (821) and built to cross piece boundaries: duplicate records far apart in input
 order (with different effects, so the kept copy is identifiable), palindromic SNPs, rare variants, indels,
-alleles that need swapping, complementing or dropping against the FASTA, rows missing required fields, and rows
-that cannot be placed on GRCh38 (an rsID absent from the reference, no position or rsID, a failed liftover).
+alleles that need swapping or complementing against the FASTA, rows missing required fields, and rows that cannot be
+placed on GRCh38 (an rsID absent from the reference, no position or rsID, alleles matching neither strand of GRCh37, no
+liftover chain).
 """
 
 import os
@@ -14,11 +16,9 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 
-from testlib import chain_block, make_reference, run_standardise, write_chain, write_lookup, write_table  # noqa: I001 (puts pipeline/bin on sys.path)
+from testlib import make_reference, needs_liftover, run_standardise, write_fasta, write_table  # noqa: I001 (puts pipeline/bin on sys.path)
 
-import gwas_alleles as alleles
 from test_standardise_passthrough import write_vcf
 
 BASES = np.array(list("ACGT"))
@@ -81,10 +81,12 @@ def synthetic_case(root: Path, n: int = 240, seed: int = 821) -> tuple[Path, Pat
     table_rows.insert(100, ["", "", "chr_unknown", "A", "G", 0.003, 0.01, 0.02, 0.3, 5000])
     table_rows.insert(200, ["3", 2000, "rs77777777", "A", "G", 0.3, 0.01, 0.02, 0.3, 5000])
     reference = make_reference(root / "ref", lookup_rows=reference_rows, fasta=genome)
+    write_fasta(reference / "genome", {c: seq[OFFSET:] for c, seq in genome.items()}, name="GRCh37.fa")  # GRCh38 = GRCh37 + 100
     raw = write_table(root / "gwas.tsv", ["CHR", "POS", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P", "N"], table_rows)
     return raw, reference
 
 
+@needs_liftover
 class PiecewiseEquivalenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -113,7 +115,8 @@ class PiecewiseEquivalenceTests(unittest.TestCase):
         self.assertEqual(whole.qc["table_pieces"]["pieces"], 1)
         self.assertGreater(whole.qc["duplicates_removed"], 0)
         self.assertGreater(whole.qc["palindromic_resolution"]["palindromic_total"], 0)
-        self.assertGreater(whole.qc["reference_alignment"]["dropped_mismatch"], 0)
+        # alleles that cannot be oriented to GRCh37 are not lifted: the 24 kind-3 pairs, and the chromosome 3 row (not in the FASTA)
+        self.assertEqual(whole.qc["liftover"]["hg19_to_hg38"]["grch37_allele_mismatch"], 25)
         self.assertGreater(whole.qc["reference_alignment"]["swapped"], 0)
         serial = self.run_case("serial", GWAS_TABLE_CHUNK="7")
         self.assertEqual(serial.qc["table_pieces"]["pieces"], 36)  # 252 rows
@@ -141,6 +144,7 @@ def assert_reconciles(case: unittest.TestCase, qc: dict) -> None:
     case.assertNotIn("does not reconcile", " ".join(qc["warnings"]))
 
 
+@needs_liftover
 class StepLogTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
@@ -159,7 +163,10 @@ class StepLogTests(unittest.TestCase):
         self.assertEqual(causes["rsid_not_in_coordinate_index"]["rows"], 1)
         self.assertEqual(causes["no_position_or_rsid"]["rows"], 1)
         self.assertEqual(causes["no_position_or_rsid"]["study_maf_below_threshold"], 1)
-        self.assertEqual(causes["liftover_to_grch38_failed"]["rows"], 1)
+        # the 24 kind-3 rows match neither strand of GRCh37, and the fixture's GRCh37 genome has no chromosome 3, so none
+        # of the 25 can be lifted; they are counted as allele mismatches, not as liftover failures
+        self.assertEqual(causes["alleles_do_not_match_grch37"]["rows"], 25)
+        self.assertNotIn("liftover_to_grch38_failed", causes)
         self.assertEqual(sum(c["rows"] for c in causes.values()), result.qc["rows_removed_missing_required"])
         self.assertIn("Alleles and GRCh38 coordinates", result.stderr)  # the summary is printed for the Nextflow task log
         self.assertIn(f"Written: {result.qc['output_rows']:,} of {result.qc['input_rows']:,} input rows", result.stderr)
@@ -176,13 +183,12 @@ class StepLogTests(unittest.TestCase):
         self.assertEqual(sample["SwitchedAlleles"], sum(r["INFO"]["HM"].endswith("swapped") for r in result.rows))
 
     def test_step_log_reconciles_for_a_lifted_gwas_vcf(self):
-        reference = self.tmp / "vcf_reference"
-        write_lookup(reference, [("1", "rs1", 1000, "G", "A", 0.3), ("1", "rs2", 2000, "C", "T", 0.004)])
-        write_chain(reference / "genome" / "hg19ToHg38.over.chain.gz", [chain_block("chr1", "chr1", 249250621, 248956422, 0, 100000, 0, 1)])
+        reference = make_reference(self.tmp / "vcf_reference", lookup_rows=[("1", "rs1", 1000, "G", "A", 0.3), ("1", "rs2", 2000, "C", "T", 0.004)],
+                                   genomes=True)
         raw = write_vcf(self.tmp / "grch37.gwas.vcf", [
             ("1", 1000, "rs1", "A", "G", "0.01:0.01:1:0.3:1000"), ("1", 2000, "rs2", "T", "C", "0.01:0.01:1:0.004:1000"),
-            ("1", 1000, "rs1", "A", "G", "0.02:0.01:1:0.3:1000"), ("1", 500000, "rs3", "A", "G", "0.01:0.01:1:0.3:1000"),
-            ("GL000192.1", 10, "rs4", "A", "G", "0.01:0.01:1:0.3:1000"), ("2", 3000, "rs5", "A", "G", "0.01:0.01:1:0.3:1000")])
+            ("1", 1000, "rs1", "A", "G", "0.02:0.01:1:0.3:1000"), ("1", 2_000_000, "rs3", "A", "G", "0.01:0.01:1:0.3:1000"),
+            ("GL000192.1", 10, "rs4", "A", "G", "0.01:0.01:1:0.3:1000"), ("2", 2_000_000, "rs5", "A", "G", "0.01:0.01:1:0.3:1000")])
         result = run_standardise(self.tmp, raw, reference, name="vcf_steps", input_build="hg19")
         self.assertEqual(result.returncode, 0, result.stderr)
         assert_reconciles(self, result.qc)
@@ -191,32 +197,6 @@ class StepLogTests(unittest.TestCase):
         self.assertEqual(coordinates["removed"], 3)  # GL contig, and positions outside the chain on chromosomes 1 and 2
         duplicates = next(s for s in result.qc["steps"] if s["title"] == "Duplicates")
         self.assertEqual(duplicates["removed"], 1)
-
-
-class PreparedLookupCacheTests(unittest.TestCase):
-    def setUp(self):
-        self.root = Path(tempfile.mkdtemp())
-        self.rows = [("1", "rs1", 1000, "A", "G", 0.3), ("2", "rs2", 2000, "C", "T", 0.6), ("X", ".", 3000, "G", "A", 0.1)]
-
-    def test_cache_is_written_and_matches_a_fresh_read(self):
-        write_lookup(self.root, self.rows, population="EUR")
-        first, pop = alleles.read_reference_lookup(self.root, "EUR")
-        self.assertEqual(pop, "EUR")
-        cache = self.root / "1000genomes" / "phase3" / "lookup" / "EUR.prepared"
-        self.assertTrue((cache / "meta.json").exists())
-        cached, _ = alleles.read_reference_lookup(self.root, "EUR")
-        pd.testing.assert_frame_equal(cached, first)
-        pd.testing.assert_frame_equal(cached, alleles._read_and_prepare(cache.parent / "EUR.tsv"))
-
-    def test_changed_lookup_file_is_read_again(self):
-        path = write_lookup(self.root, self.rows, population="EUR")
-        alleles.read_reference_lookup(self.root, "EUR")
-        write_lookup(self.root, self.rows + [("3", "rs4", 4000, "T", "C", 0.4)], population="EUR")
-        os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 10**9))
-        table, _ = alleles.read_reference_lookup(self.root, "EUR")
-        self.assertEqual(len(table), 4)
-        self.assertIn(4, table["RS"].tolist())
-
 
 if __name__ == "__main__":
     unittest.main()

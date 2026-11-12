@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from testlib import EXAMPLES, run_script
+from testlib import EXAMPLES, example_reference, run_script
 
 MANIFEST_HEADER = "GWAS_location\tphenotype\tancestry\tauthor\tyear\tPMID\n"
 
@@ -26,7 +26,7 @@ class PrepareManifestTests(unittest.TestCase):
     def prepare(self, manifest, *extra, check=True):
         args = ["--manifest", manifest, "--work-root", self.tmp / "work", "--state-file", self.tmp / ".standardise_state.tsv",
                 "--output", self.tmp / "run.tsv", "--summary", self.tmp / "summary.json", "--rows-dir", self.tmp / "rows",
-                "--config-root", self.config_root, "--reference-root", EXAMPLES / "reference", *extra]
+                "--config-root", self.config_root, "--reference-root", example_reference(), *extra]
         return run_script("prepare_manifest.py", *args, check=check)
 
     def rows(self):

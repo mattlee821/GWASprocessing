@@ -238,6 +238,8 @@ def paired_build_sample(reference_root: str | Path) -> dict[str, tuple[np.ndarra
 def build_hits(sample: tuple[np.ndarray, np.ndarray, np.ndarray], chrom: Any, pos: Any, a: Any, b: Any) -> int:
     """How many rows match a sampled SNP at the same position with the same allele pair (either order, either strand)."""
     key, ref, alt = sample
+    if not len(key):
+        return 0
     q = position_keys(chrom, pos)
     idx = np.minimum(np.searchsorted(key, q), max(len(key) - 1, 0))
     at = (q >= 0) & (len(key) > 0) & (key[idx] == q)

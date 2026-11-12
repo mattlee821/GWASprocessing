@@ -13,6 +13,7 @@ from typing import Any
 CAUSE_TEXT = {
     "rsid_not_in_coordinate_index": "no position in the file and the rsID is not in dbSNP (current or merged rsIDs)",
     "no_position_or_rsid": "no position in the file and no rsID to look one up",
+    "alleles_do_not_match_grch37": "alleles match neither strand of the GRCh37 reference at the position, so it cannot be lifted",
     "liftover_to_grch38_failed": "GRCh37 position could not be lifted to GRCh38",
     "chromosome_not_primary": "chromosome is not 1-22, X, Y or MT",
     "invalid_position": "position is zero or negative",
@@ -23,7 +24,7 @@ CAUSE_TEXT = {
     "missing_or_invalid_p": "P value missing or invalid and not derivable",
 }
 COORDINATE_CAUSES = ("rsid_not_in_coordinate_index", "no_position_or_rsid", "missing_allele", "invalid_allele",
-                     "liftover_to_grch38_failed", "chromosome_not_primary", "invalid_position")
+                     "alleles_do_not_match_grch37", "liftover_to_grch38_failed", "chromosome_not_primary", "invalid_position")
 STATISTIC_CAUSES = ("missing_beta", "missing_or_invalid_se", "missing_or_invalid_p")
 LIFTOVER_TEXT = {
     "unmapped": "position absent from the chain file",

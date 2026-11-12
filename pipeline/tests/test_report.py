@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from testlib import EXAMPLES, run_script, run_standardise, write_table
+from testlib import example_reference, generic_grch38_table, run_script, run_standardise, write_table
 
 import report
 
@@ -51,7 +51,7 @@ class QqThinningTests(unittest.TestCase):
 class PlotTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        result = run_standardise(self.tmp, EXAMPLES / "tables/generic.tsv", EXAMPLES / "reference", input_build="hg19")
+        result = run_standardise(self.tmp, generic_grch38_table(self.tmp / "generic.tsv"), example_reference())
         self.assertEqual(result.returncode, 0, result.stderr)
         self.record = Path(result.record["standard_vcf"]).parent.parent / "record.json"
 

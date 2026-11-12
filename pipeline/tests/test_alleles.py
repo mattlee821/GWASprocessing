@@ -1,5 +1,5 @@
-"""Tests for gwas_alleles: reference lookup, positional annotation, EAF fill, palindromic resolution,
-de-duplication, allele-frequency concordance, FASTA access and reference-allele alignment."""
+"""Tests for gwas_alleles: 1000 Genomes GRCh38 annotation, EAF fill, palindromic resolution, de-duplication,
+allele-frequency concordance, FASTA access and reference-allele alignment."""
 
 import tempfile
 import unittest
@@ -8,84 +8,61 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from testlib import write_fasta, write_lookup
+from testlib import write_fasta, write_grch38_references
 
 import gwas_alleles as alleles
+import gwas_reference
 
 
 def frame(**columns):
+    """Rows on chromosome 1 at GRCh38 positions 1000, 1001, ... unless POS38 is given."""
     n = len(next(iter(columns.values())))
-    base = {"CHR": ["1"] * n, "POS19": [1000 + i for i in range(n)], "POS38": [1100 + i for i in range(n)],
-            "SNP": [pd.NA] * n, "EAF": [np.nan] * n, "EAF_SOURCE": [""] * n, "BETA": [0.1] * n, "LIFT_STRAND": ["+"] * n}
+    base = {"CHR": ["1"] * n, "POS38": [1000 + i for i in range(n)], "SNP": [pd.NA] * n, "EAF": [np.nan] * n,
+            "EAF_SOURCE": [""] * n, "BETA": [0.1] * n}
     base.update(columns)
     return pd.DataFrame(base)
 
 
-def lookup(rows):
-    return pd.DataFrame(rows, columns=["CHR", "SNP", "POS19", "A1", "A2", "AF1"])
+def frequencies(rows):
+    """1000 Genomes GRCh38 frequencies from rows (chrom, pos38, ALT, REF, ALT frequency)."""
+    root = Path(tempfile.mkdtemp())
+    write_grch38_references(root, [(c, p, 0, ref, alt, af) for c, p, alt, ref, af in rows])
+    return gwas_reference.Frequencies.find(root, "ALL")
 
 
-class ReferenceLookupTests(unittest.TestCase):
-    def test_population_table_is_preferred_and_fallback_is_reported(self):
-        root = Path(tempfile.mkdtemp())
-        write_lookup(root, [("1", "rs1", 1000, "A", "G", 0.1)], population="ALL")
-        self.assertEqual(alleles.read_reference_lookup(root, "EUR")[1], "ALL")
-        write_lookup(root, [("1", "rs1", 1000, "A", "G", 0.3)], population="EUR")
-        table, used = alleles.read_reference_lookup(root, "EUR")
-        self.assertEqual((used, table.loc[0, "AF1"]), ("EUR", 0.3))
-
-    def test_legacy_columns_are_ignored_and_values_normalised(self):
-        root = Path(tempfile.mkdtemp())
-        write_lookup(root, [("chr1", "RS1", 1000, "a", "g", 0.1, "1:1000", 0.1), ("X", "rs2", 500, "C", "T", 0.3, "X:500", 0.3)],
-                     columns=["CHR", "SNP", "POS19", "A1", "A2", "AF1", "SNPID", "EAF_ALL"])
-        table, _ = alleles.read_reference_lookup(root, "ALL")
-        self.assertNotIn("EAF_ALL", table.columns)
-        row = table.iloc[0]
-        self.assertEqual((row["CHR"], row["RS"], row["POS19"], row["A1"], row["A2"], row["AF1"]), ("1", 1, 1000, "A", "G", 0.1))
-        self.assertEqual(table["KEY"].tolist(), [1 * 10**10 + 1000, 23 * 10**10 + 500])
-
-    def test_missing_tables_give_an_empty_frame(self):
-        table, used = alleles.read_reference_lookup(Path(tempfile.mkdtemp()), "EUR")
-        self.assertTrue(table.empty)
-        self.assertEqual(used, "")
+def annotate(data, rows):
+    return alleles.annotate_with_frequencies(data, frequencies(rows))
 
 
 class AnnotationTests(unittest.TestCase):
-    def test_match_needs_position_and_alleles_and_supplies_missing_rsids(self):
-        data = frame(POS19=[1000, 1000, 2000], EA=["A", "A", "C"], OA=["G", "C", "T"])
-        # Two reference variants share position 1000 (A/G and A/C); each input row must get its own allele match.
-        ref = lookup([("1", "rs101", 1000, "A", "G", 0.2), ("1", "rs102", 1000, "A", "C", 0.4), ("1", "rs103", 3000, "C", "T", 0.5)])
-        annotated = alleles.annotate_with_reference(data, ref)
-        self.assertEqual(annotated["REF_SNP"].tolist()[:2], ["rs101", "rs102"])
-        self.assertTrue(pd.isna(annotated["REF_SNP"].iloc[2]))
-        filled, count = alleles.fill_missing_rsids(annotated)
-        self.assertEqual((filled["SNP"].tolist()[:2], count), (["rs101", "rs102"], 2))
+    def test_match_needs_position_and_alleles(self):
+        data = frame(POS38=[1000, 1000, 2000], EA=["A", "A", "C"], OA=["G", "C", "T"])
+        # Two 1000 Genomes records share position 1000 (A/G and A/C); each input row must get its own allele match.
+        annotated = annotate(data, [("1", 1000, "A", "G", 0.2), ("1", 1000, "A", "C", 0.4), ("1", 3000, "C", "T", 0.5)])
+        np.testing.assert_allclose(annotated["REF_AF1"].iloc[:2], [0.2, 0.4])
+        self.assertEqual((annotated["REF_A1"].iloc[1], annotated["REF_A2"].iloc[1]), ("A", "C"))
+        self.assertTrue(np.isnan(annotated["REF_AF1"].iloc[2]))
 
-    def test_minus_strand_loci_are_matched_in_grch37_orientation(self):
-        # After liftover onto the minus strand the GRCh38 alleles are the complement of the GRCh37 ones.
-        data = frame(EA=["T"], OA=["C"], LIFT_STRAND=["-"])
-        annotated = alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "G", 0.2)]))
-        self.assertEqual(annotated["REF_SNP"].iloc[0], "rs1")
-        ea37, oa37 = alleles.grch37_alleles(annotated)
-        self.assertEqual((ea37.iloc[0], oa37.iloc[0]), ("A", "G"))
+    def test_reverse_strand_alleles_match(self):
+        annotated = annotate(frame(EA=["T"], OA=["C"]), [("1", 1000, "A", "G", 0.2)])
+        self.assertAlmostEqual(annotated["REF_AF1"].iloc[0], 0.2, places=6)
 
 
 class EafFillTests(unittest.TestCase):
-    def setUp(self):
-        self.ref = lookup([("1", "rs1", 1000, "A", "G", 0.8), ("1", "rs2", 1001, "A", "G", 0.8), ("1", "rs3", 1002, "A", "G", 0.8),
-                           ("1", "rs4", 1003, "A", "G", 0.8), ("1", "rs5", 1004, "A", "C", 0.8)])
+    rows = [("1", 1000, "A", "G", 0.8), ("1", 1001, "A", "G", 0.8), ("1", 1002, "A", "G", 0.8), ("1", 1003, "A", "G", 0.8),
+            ("1", 1004, "A", "C", 0.8)]
 
     def test_fill_uses_the_frequency_of_the_effect_allele(self):
-        # rs1: EA=A1. rs2: EA=A2. rs3: GWAS on the reverse strand (T/C), EA=T is A1's complement.
+        # 1000: EA=ALT. 1001: EA=REF. 1002: GWAS on the reverse strand (T/C), EA=T is ALT's complement.
         data = frame(EA=["A", "G", "T"], OA=["G", "A", "C"])
-        filled, count = alleles.fill_eaf_from_reference(alleles.annotate_with_reference(data, self.ref))
+        filled, count = alleles.fill_eaf_from_reference(annotate(data, self.rows))
         np.testing.assert_allclose(filled["EAF"], [0.8, 0.2, 0.8])
         self.assertEqual((count, filled["EAF_SOURCE"].tolist()), (3, ["reference"] * 3))
 
     def test_study_frequencies_are_kept_and_unmatched_rows_stay_missing(self):
         data = frame(EA=["A", "A", "A", "A", "A"], OA=["G", "G", "G", "G", "T"], EAF=[0.3, np.nan, np.nan, np.nan, np.nan],
-                     EAF_SOURCE=["input", "", "", "", ""], POS19=[1000, 1001, 1002, 9999, 1004])
-        filled, count = alleles.fill_eaf_from_reference(alleles.annotate_with_reference(data, self.ref))
+                     EAF_SOURCE=["input", "", "", "", ""], POS38=[1000, 1001, 1002, 9999, 1004])
+        filled, count = alleles.fill_eaf_from_reference(annotate(data, self.rows))
         self.assertEqual(filled["EAF"].iloc[0], 0.3)
         self.assertEqual(filled["EAF_SOURCE"].tolist(), ["input", "reference", "reference", "", ""])
         self.assertTrue(np.isnan(filled["EAF"].iloc[3:]).all())
@@ -94,11 +71,11 @@ class EafFillTests(unittest.TestCase):
 
 class PalindromicResolutionTests(unittest.TestCase):
     def test_palindromes_are_kept_complemented_or_marked_ambiguous_never_dropped(self):
-        ref = lookup([("1", "rsP1", 1000, "A", "T", 0.20), ("1", "rsP2", 1001, "C", "G", 0.15), ("1", "rsP3", 1002, "A", "T", 0.47)])
+        rows = [("1", 1000, "A", "T", 0.20), ("1", 1001, "C", "G", 0.15), ("1", 1002, "A", "T", 0.47)]
         data = frame(SNP=["rsP1", "rsP2", "rsP3", "rsP4", "rsN1"], EA=["A", "C", "A", "A", "A"], OA=["T", "G", "T", "T", "G"],
                      EAF=[0.20, 0.85, 0.47, 0.20, 0.30], EAF_SOURCE=["input"] * 5)
         qc = {}
-        resolved = alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), qc)
+        resolved = alleles.resolve_palindromic_strand(annotate(data, rows), qc)
         self.assertEqual(len(resolved), 5)
         detail = qc["palindromic_resolution"]
         self.assertEqual((detail["kept_same_strand"], detail["flipped"], detail["ambiguous_frequency_near_half"],
@@ -113,35 +90,22 @@ class PalindromicResolutionTests(unittest.TestCase):
         # EAF came from the reference itself, so it carries no strand information: ambiguous, never flipped.
         data = frame(EA=["A"], OA=["T"], EAF=[0.2], EAF_SOURCE=["reference"], BETA=[0.1])
         qc = {}
-        resolved = alleles.resolve_palindromic_strand(
-            alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "T", 0.8)])), qc)
+        resolved = alleles.resolve_palindromic_strand(annotate(data, [("1", 1000, "A", "T", 0.8)]), qc)
         self.assertEqual((len(resolved), resolved["PAL"].iloc[0], resolved["EA"].iloc[0]), (1, "ambiguous", "A"))
         self.assertEqual(qc["palindromic_resolution"]["ambiguous_no_study_eaf"], 1)
         self.assertEqual(qc["palindromic_resolution"]["flipped"], 0)
 
-    def test_minus_strand_palindrome_is_judged_in_grch37_orientation(self):
-        # GRCh38 alleles T/A at a minus-strand locus are A/T on GRCh37. Study EAF 0.2 for GRCh38 T = GRCh37 A,
-        # and the reference frequency of A is 0.2: same strand, so the variant is kept unchanged.
-        data = frame(EA=["T"], OA=["A"], EAF=[0.2], EAF_SOURCE=["input"], LIFT_STRAND=["-"])
-        qc = {}
-        resolved = alleles.resolve_palindromic_strand(
-            alleles.annotate_with_reference(data, lookup([("1", "rs1", 1000, "A", "T", 0.2)])), qc)
-        self.assertEqual((resolved["EA"].iloc[0], resolved["OA"].iloc[0], resolved["PAL"].iloc[0]), ("T", "A", "forward"))
-        self.assertEqual(qc["palindromic_resolution"]["kept_same_strand"], 1)
-
     def test_without_reference_alleles_every_palindrome_is_ambiguous(self):
         data = frame(EA=["A", "C", "A"], OA=["T", "G", "G"], EAF=[0.2, 0.2, 0.2], EAF_SOURCE=["input"] * 3)
-        bare = pd.DataFrame(columns=["CHR", "SNP", "POS19", "A1", "A2", "AF1"])
         qc = {}
-        resolved = alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, bare), qc)
+        resolved = alleles.resolve_palindromic_strand(annotate(data, []), qc)
         self.assertEqual(resolved["PAL"].tolist(), ["ambiguous", "ambiguous", ""])
 
     def test_tolerance_can_be_widened(self):
         data = frame(EA=["A"], OA=["T"], EAF=[0.38], EAF_SOURCE=["input"])
-        ref = lookup([("1", "rs1", 1000, "A", "T", 0.30)])
-        self.assertEqual(alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), {})["PAL"].iloc[0], "forward")
-        self.assertEqual(alleles.resolve_palindromic_strand(alleles.annotate_with_reference(data, ref), {}, 0.15)["PAL"].iloc[0],
-                         "ambiguous")
+        rows = [("1", 1000, "A", "T", 0.30)]
+        self.assertEqual(alleles.resolve_palindromic_strand(annotate(data, rows), {})["PAL"].iloc[0], "forward")
+        self.assertEqual(alleles.resolve_palindromic_strand(annotate(data, rows), {}, 0.15)["PAL"].iloc[0], "ambiguous")
 
 
 class DeduplicationTests(unittest.TestCase):
@@ -155,21 +119,21 @@ class ConcordanceTests(unittest.TestCase):
     def setUp(self):
         rng = np.random.default_rng(821)
         self.af = rng.uniform(0.05, 0.95, 2000)
-        self.ref = lookup([("1", f"rs{i}", 1000 + i, "A", "G", af) for i, af in enumerate(self.af)])
+        self.freqs = frequencies([("1", 1000 + i, "A", "G", af) for i, af in enumerate(self.af)])
 
     def test_concordant_frequencies_correlate_positively(self):
-        data = frame(POS19=[1000 + i for i in range(2000)], EA=["A"] * 2000, OA=["G"] * 2000, EAF=self.af, EAF_SOURCE=["input"] * 2000)
-        result = alleles.af_concordance(alleles.annotate_with_reference(data, self.ref))
+        data = frame(POS38=[1000 + i for i in range(2000)], EA=["A"] * 2000, OA=["G"] * 2000, EAF=self.af, EAF_SOURCE=["input"] * 2000)
+        result = alleles.af_concordance(alleles.annotate_with_frequencies(data, self.freqs))
         self.assertEqual(result["n"], 2000)
         self.assertGreater(result["pearson_r"], 0.99)
 
     def test_swapped_allele_columns_give_a_negative_correlation(self):
-        data = frame(POS19=[1000 + i for i in range(2000)], EA=["G"] * 2000, OA=["A"] * 2000, EAF=self.af, EAF_SOURCE=["input"] * 2000)
-        self.assertLess(alleles.af_concordance(alleles.annotate_with_reference(data, self.ref))["pearson_r"], -0.99)
+        data = frame(POS38=[1000 + i for i in range(2000)], EA=["G"] * 2000, OA=["A"] * 2000, EAF=self.af, EAF_SOURCE=["input"] * 2000)
+        self.assertLess(alleles.af_concordance(alleles.annotate_with_frequencies(data, self.freqs))["pearson_r"], -0.99)
 
     def test_reference_filled_and_palindromic_rows_are_excluded(self):
-        data = frame(POS19=[1000, 1001], EA=["A", "A"], OA=["G", "T"], EAF=[0.3, 0.3], EAF_SOURCE=["reference", "input"])
-        self.assertEqual(alleles.af_concordance(alleles.annotate_with_reference(data, self.ref))["n"], 0)
+        data = frame(POS38=[1000, 1001], EA=["A", "A"], OA=["G", "T"], EAF=[0.3, 0.3], EAF_SOURCE=["reference", "input"])
+        self.assertEqual(alleles.af_concordance(alleles.annotate_with_frequencies(data, self.freqs))["n"], 0)
 
 
 class FastaTests(unittest.TestCase):
