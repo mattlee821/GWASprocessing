@@ -125,10 +125,10 @@ class ConfigAndStateTests(unittest.TestCase):
             self.assertEqual(common.resolve_study_config(tmp, "example_2020_1", str(tmp / "explicit.yaml"))["input_build"], "hg38")
 
     def test_merge_dicts_merges_nested_mappings_without_mutating_inputs(self):
-        base = {"analysis_qc": {"maf_threshold": 0.01, "deduplicate": True}, "delimiter": "\t"}
-        merged = common.merge_dicts(base, {"analysis_qc": {"maf_threshold": 0.05}})
-        self.assertEqual(merged["analysis_qc"], {"maf_threshold": 0.05, "deduplicate": True})
-        self.assertEqual(base["analysis_qc"]["maf_threshold"], 0.01)
+        base = {"sample": {"ncase": 100, "ncontrol": 200}, "delimiter": "\t"}
+        merged = common.merge_dicts(base, {"sample": {"ncase": 150}})
+        self.assertEqual(merged["sample"], {"ncase": 150, "ncontrol": 200})
+        self.assertEqual(base["sample"]["ncase"], 100)
 
     def test_failed_json_write_leaves_previous_file_intact(self):
         tmp = Path(tempfile.mkdtemp())

@@ -426,10 +426,9 @@ def without_appledouble(paths: Iterable[Path]) -> list[Path]:
 
 def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
     """Size and mtime of every reference file that can change outputs (GRCh38 dbSNP index and merge map, 1000 Genomes
-    frequencies, build-detection sample, legacy lookups and coordinate index, chains, FASTA)."""
+    frequencies, build-detection sample, chains, FASTA)."""
     root = Path(reference_root)
     patterns = ["dbsnp/GRCh38/*.json", "dbsnp/GRCh38/merged_*.u32", "1000genomes/GRCh38/*", "build_detection/*",
-                "1000genomes/phase3/lookup/*.tsv*", "1000genomes/phase3/coordinates/*.npy",
                 "genome/*.chain*", "genome/*.fa", "genome/*.fasta"]
     identity: dict[str, list[int]] = {}
     for pattern in patterns:
@@ -612,16 +611,6 @@ def read_table(path: str | Path, delimiter: str | None = None, comment: str | No
         path, sep=sep, compression=compression, comment=comment, low_memory=False,
         skiprows=skip, na_values=["."], keep_default_na=True, **kwargs,
     )
-
-
-def read_reference_lookup(reference_root: str | Path, population: str) -> pd.DataFrame:
-    root = Path(reference_root) / "1000genomes" / "phase3" / "lookup"
-    for pop in [population, "ALL", "EUR"]:
-        for suffix in [".tsv.gz", ".tsv"]:
-            path = root / f"{pop}{suffix}"
-            if path.exists():
-                return read_table(path, delimiter="\t")
-    return pd.DataFrame()
 
 
 def resolve_ancestry(value: Any) -> str | None:

@@ -1,4 +1,4 @@
-# Real settings, created from the tracked .env.example by src/source.sh (server.env is the old name)
+# Real settings, created from the tracked .env.example by src/source.sh (server.env: the old name, moved into .env by setup)
 .env
 server.env
 
@@ -28,6 +28,3 @@ __pycache__/
 .Ruserdata
 .DS_Store
 ._*
-
-# Prepared reference-lookup caches written by the pipeline (also inside the test examples)
-*.prepared/

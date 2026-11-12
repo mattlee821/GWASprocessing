@@ -4,7 +4,7 @@
 Usage:
     python3 src/benchmark/check_install.py --expected src/benchmark/expected/locke_2015.tsv --output standardised.gwas.vcf.gz
 
-Run the benchmark GWAS through the pipeline on the new machine (see src/benchmark/README.md), then point this at its
+Run the benchmark GWAS through the pipeline on the new machine (see README.md, section 2, step 7), then point this at its
 output. Every expected variant must be present with the same GRCh38 position, alleles and values (ES, SE and LP to 6
 significant digits, AF and AFS exactly). Exits 1 and lists the first differences if anything differs.
 """

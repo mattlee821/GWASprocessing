@@ -108,7 +108,7 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(self.value("run"), str(repo / "pipeline" / "main.nf"))
 
     def test_environment_values_override_dotenv_defaults(self):
-        repo = fake_repo(self.tmp, dotenv="GWAS_WORK_ROOT=GWAS\nGWAS_QCPLOT=true\n# comment\n")
+        repo = fake_repo(self.tmp, dotenv="GWAS_WORK_ROOT=GWAS\nGWAS_REPORT=true\n# comment\n")
         work = self.tmp / "elsewhere" / "GWAS"
         proc = self.run_wrapper(repo, env=self.env(GWAS_WORK_ROOT=str(work)))
         self.assertEqual(proc.returncode, 0, proc.stderr)

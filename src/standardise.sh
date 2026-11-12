@@ -53,7 +53,6 @@ Options:
   --report true|false   Write the per-GWAS HTML report (steps, QC flags, QQ plots). Default: true.
                         Set false for large batches; generate a report later with
                         python3 pipeline/bin/report.py --dir GWAS/<STUDYID>/standardise/<SOURCE_ID>.
-                        --qcplot is accepted as the old name.
   -h, --help            Show this help.
 
 Environment (or .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
@@ -82,7 +81,7 @@ REFERENCE_ROOT="${GWAS_REFERENCE_ROOT:-references}"
 CONFIG_ROOT="${GWAS_CONFIG_ROOT:-manifests}"
 TEMP_ROOT="${GWAS_TEMP_ROOT:-temp}"
 LOG_ROOT="${GWAS_LOG_ROOT:-temp/logs}"
-REPORT="${GWAS_REPORT:-${GWAS_QCPLOT:-true}}"  # GWAS_QCPLOT: the old name, still in older settings files
+REPORT="${GWAS_REPORT:-true}"
 ROW_LIMIT="${GWAS_ROW_LIMIT:-}"
 NEXTFLOW_WORK="${GWAS_NEXTFLOW_WORK:-temp/nextflow_work}"
 NEXTFLOW_LOG="${GWAS_NEXTFLOW_LOG:-temp/.nextflow.log}"
@@ -101,7 +100,7 @@ while [[ $# -gt 0 ]]; do
     --row-limit) ROW_LIMIT="$2"; shift 2 ;;
     --force) FORCE="true"; shift ;;
     --dry-run) DRY_RUN="true"; shift ;;
-    --report|--qcplot) REPORT="$2"; shift 2 ;;
+    --report) REPORT="$2"; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage >&2; exit 2 ;;
   esac
