@@ -202,7 +202,7 @@ The VCF follows GWAS-VCF specification 1.0.0 as gwas2vcf writes it, so R gwasvcf
 | `ALT` | effect allele; 1 row per allele, no multi-allelic rows |
 | `QUAL`, `FILTER` | `.`, `PASS` |
 | `INFO/SNPID` | the study's own variant identifier |
-| `INFO/HM` | what was done to the study's alleles: `forward` (as reported), `swapped` (effect allele was the GRCh38 reference base: ES negated, AF to 1 − AF), `complemented` (alleles on the other strand from the study's, whether from the study's reporting strand or a minus-strand liftover), `complemented_swapped`, `unverified` (no reference sequence at the position), or for palindromic SNPs `palindrome_forward`, `palindrome_complemented`, `palindrome_ambiguous`, each with `_swapped` when the alleles were then swapped |
+| `INFO/HM` | what was done to the study's alleles: `forward` (as reported), `swapped` (effect allele was the GRCh38 reference base: ES negated, AF to 1 − AF), `complemented` (alleles on the other strand from the study's, whether from the study's reporting strand or a minus-strand liftover), `complemented_swapped`, `unverified` (no reference sequence at the position), or for palindromic SNPs `palindrome_forward`, `palindrome_complemented`, `palindrome_ambiguous`, `palindrome_ambiguous_complemented` (strand not inferable, but liftover complemented the alleles on a minus-strand block), each with `_swapped` when the alleles were then swapped |
 | `FORMAT/ES`, `SE` | effect size relative to ALT (log OR for binary traits), its standard error |
 | `FORMAT/LP` | −log10 P; recover `P = 10^(−LP)` |
 | `FORMAT/AF` | ALT frequency: study-reported, else the 1000 Genomes frequency of the matched population |

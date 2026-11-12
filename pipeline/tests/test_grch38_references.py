@@ -148,7 +148,10 @@ class HarmonisationActionTests(unittest.TestCase):
         changed = np.array([False, False, True, True, True, False, False, False, True, True, True])
         self.assertEqual(harmonisation_action(pal, action, changed).tolist(), [
             "forward", "complemented", "complemented", "complemented_swapped", "forward", "dropped", "unverified",
-            "palindrome_forward", "palindrome_complemented_swapped", "palindrome_forward", "palindrome_ambiguous"])
+            "palindrome_forward", "palindrome_complemented_swapped", "palindrome_forward", "palindrome_ambiguous_complemented"])
+        # an ambiguous palindrome that liftover did not complement stays ambiguous
+        self.assertEqual(harmonisation_action(np.array(["ambiguous"], dtype=object), np.array(["swap"], dtype=object),
+                                              np.array([False])).tolist(), ["palindrome_ambiguous_swapped"])
 
     def test_without_liftover_hm_follows_the_alignment_alone(self):
         self.assertEqual(harmonisation_action(np.array(["", ""], dtype=object), np.array(["complement_swap", "swap"], dtype=object)).tolist(),

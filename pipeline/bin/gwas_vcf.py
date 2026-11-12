@@ -55,11 +55,13 @@ FORMAT_DEFINITIONS = {
 BASE_FORMAT = ("ES", "SE", "LP", "AF", "AFS")
 OPTIONAL_FORMAT = {"N": "SS", "NCASE": "NC", "EZ": "EZ", "IMPINFO": "SI"}
 HM_DESCRIPTION = ("Harmonisation action. Non-palindromic: forward (as reported), swapped (effect allele was the reference "
-                  "base; ES negated and AF to 1-AF), complemented (reported on the reverse strand), complemented_swapped, "
+                  "base; ES negated and AF to 1-AF), complemented (alleles on the other strand from the "
+                  "study's: reported on the reverse strand, or complemented by liftover), complemented_swapped, "
                   "unverified (no reference sequence at the position). "
                   "Palindromic (A/T or C/G): palindrome_forward or palindrome_complemented (strand inferred from study vs "
                   "1000 Genomes frequency with tolerance 0.08), or palindrome_ambiguous (strand could not be inferred; kept "
-                  "as reported); each with _swapped when the alleles were then swapped")
+                  "as reported), palindrome_ambiguous_complemented (strand could not be inferred, and liftover complemented the "
+                  "alleles on a minus-strand block); each with _swapped when the alleles were then swapped")
 INFO_DEFINITIONS = [
     '##INFO=<ID=SNPID,Number=1,Type=String,Description="Variant identifier in the source file">',
     f'##INFO=<ID=HM,Number=1,Type=String,Description="{HM_DESCRIPTION}">',

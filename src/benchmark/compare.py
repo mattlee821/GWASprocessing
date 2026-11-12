@@ -128,7 +128,7 @@ def main() -> None:
 
     raw = read_raw(args.raw, args.raw_columns.split(",")).drop_duplicates("rsid").set_index("rsid")
     pipelines = {"GWASprocessing": read_vcf(args.ours)}
-    for name, path, reader in (("OpenGWAS", args.opengwas, read_vcf), ("gwas2vcf_GRCh38", args.gwas2vcf, read_vcf),
+    for name, path, reader in (("OpenGWAS", args.opengwas, read_vcf), ("gwas2vcf", args.gwas2vcf, read_vcf),
                                ("GWAS_Catalog_harmoniser", args.catalog, read_catalog), ("MungeSumstats", args.mungesumstats, read_mungesumstats)):
         if path:
             pipelines[name] = reader(path)

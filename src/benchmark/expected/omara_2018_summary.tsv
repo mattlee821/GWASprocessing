@@ -1,0 +1,6 @@
+pipeline	sampled	present	alleles_match	sign_agrees	effect_equal	se_equal	lp_equal	af_close	sign_agrees_palindromic	sign_agrees_other	leads_present	leads
+GWASprocessing	10016	10016	10016	0.9997	0.9997	1.0000	1.0000	0.9997	0.9980	1.0000	16	16
+OpenGWAS	10016	9973	9973	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	15	16
+gwas2vcf	10016	10016	10016	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	16	16
+GWAS_Catalog_harmoniser	10016	9984	9984	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	16	16
+MungeSumstats	10016	4304	4304	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	1.0000	4	16

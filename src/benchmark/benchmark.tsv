@@ -1,0 +1,5 @@
+GWAS_location	phenotype	ancestry	author	year	PMID	study_yaml
+https://www.ebi.ac.uk/gwas/studies/GCST002783	BMI	EUR	Locke	2015	25673413	
+https://opengwas.io/datasets/ebi-a-GCST002783	BMI	EUR	Locke	2015	25673413	
+https://www.ebi.ac.uk/gwas/studies/GCST006464	endometrial cancer	EUR	OMara	2018	30093612	src/benchmark/endometrial_omara_2018.yaml
+https://opengwas.io/datasets/ebi-a-GCST006464	endometrial cancer	EUR	OMara	2018	30093612	src/benchmark/endometrial_omara_2018.yaml

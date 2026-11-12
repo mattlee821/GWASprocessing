@@ -888,7 +888,8 @@ def harmonisation_action(pal: np.ndarray, action: np.ndarray, strand_changed: np
     strand = np.where(complemented, "complemented", "forward")
     words = np.where(aligned, np.where(swapped, np.where(complemented, "complemented_swapped", "swapped"), strand),
                      np.where(action == "drop", "dropped", "unverified")).astype(object)
-    pal_strand = np.array([{"forward": "complemented", "complemented": "forward"}.get(str(p), str(p)) if c else str(p)
+    # an ambiguous palindrome's strand cannot be judged from frequency, but a liftover complement is still recorded
+    pal_strand = np.array([{"forward": "complemented", "complemented": "forward", "ambiguous": "ambiguous_complemented"}.get(str(p), str(p)) if c else str(p)
                            for p, c in zip(pal, strand_changed)], dtype=object)
     pal_words = np.array(["palindrome_" + p + ("_swapped" if sw else "") for p, sw in zip(pal_strand, swapped)], dtype=object)
     return np.where(pal != "", pal_words, words)
