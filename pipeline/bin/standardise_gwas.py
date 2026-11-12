@@ -480,7 +480,23 @@ def fill_coordinates_from_dbsnp(out: pd.DataFrame, dbsnp: Any, qc: dict[str, Any
     qc["coordinate_source"] = qc.get("coordinate_source") or ("dbsnp" if need.any() else "input")
     if not need.any():
         return out
-    code, pos = dbsnp.positions(coords.rs_number(out.loc[need, "SNP"]))
+    numbers = np.asarray(coords.rs_number(out.loc[need, "SNP"]), dtype="int64")
+    code, pos = dbsnp.positions(numbers)
+    fills.setdefault("POS38_merged_rsid", 0)
+    via_merge = np.zeros(len(numbers), dtype=bool)
+    if dbsnp.has_merges and (code == 0).any():
+        # rsIDs retired by a dbSNP merge (rs12016871 into rs9581854): position of the current rsID. SNPID keeps the
+        # study's rsID; the ID column is matched on position and alleles later, so it carries the current one.
+        absent = np.where(code == 0)[0]
+        current = dbsnp.current_rsids(numbers[absent])
+        merged = absent[current > 0]
+        if len(merged):
+            code_m, pos_m = dbsnp.positions(current[current > 0])
+            code[merged], pos[merged] = code_m, pos_m
+            via_merge[merged] = code_m > 0
+    elif (code == 0).any():
+        qc["warnings"].append("dbSNP merge map not built (src/reference_data/build_dbsnp_merges.py): rsIDs that dbSNP has merged "
+                              "into another rsID were not given positions")
     found_chr = np.array([grch38.CHROMS[c - 1] if c > 0 else "" for c in code], dtype=object)
     current = out.loc[need, "CHR"]
     chr_ok = current.isna().to_numpy() | (current.astype(str).to_numpy() == found_chr)
@@ -489,6 +505,10 @@ def fill_coordinates_from_dbsnp(out: pd.DataFrame, dbsnp: Any, qc: dict[str, Any
     out.loc[rows, "CHR"] = found_chr[use]
     out.loc[rows, "POS38"] = pos[use].astype("float64")
     fills["POS38"] += int(use.sum())
+    fills["POS38_merged_rsid"] += int((use & via_merge).sum())
+    if (use & via_merge).any():
+        out["RS_MERGED"] = out.get("RS_MERGED", False)
+        out.loc[out.index[need][use & via_merge], "RS_MERGED"] = True
     qc["rsid_chromosome_conflicts"] = qc.get("rsid_chromosome_conflicts", 0) + int(((code > 0) & ~chr_ok).sum())
     return out
 
@@ -798,6 +818,8 @@ def candidate_columns(raw_path: Path, sep: str, config: dict[str, Any]) -> list[
 TABLE_CHUNK = 1_000_000  # table rows per piece (GWAS_TABLE_CHUNK overrides)
 BUILD_HEAD_ROWS = 200_000  # rows read from the start of the file to detect the build, whatever the piece size
 ROW_COLUMN = "_gwasprocessing_row"  # input row number, carried through each piece to restore input order
+MERGED_RSID_ORDER_OFFSET = 10 ** 12  # larger than any input row number
+
 FIRST_PIECE_ONLY = ("build_detection", "source_columns")
 
 
@@ -895,8 +917,12 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], lookup: pd.Dat
     # declare fields its records never use)
     keys = settings.get("format_keys") or gwas_vcf.format_keys(
         c for c in gwas_vcf.OPTIONAL_FORMAT if cols.get(c) and c in out.columns and np.isfinite(numeric_series(out[c])).any())
-    # each piece is written in genome order (then input order), so the merge only interleaves pre-sorted pieces
+    # each piece is written in genome order (then input order), so the merge only interleaves pre-sorted pieces. A row
+    # placed through a retired (merged) rsID sorts after every row with a current rsID, so when the file also reports the
+    # variant under its current rsID, the duplicate step keeps that row
     row_ids = rows[out.index.to_numpy()]
+    if "RS_MERGED" in out.columns:
+        row_ids = row_ids + MERGED_RSID_ORDER_OFFSET * out["RS_MERGED"].fillna(False).to_numpy(dtype=bool)
     order = np.lexsort((row_ids, out["POS38"].to_numpy(dtype="float64"), gwas_vcf.chrom_ranks(out["CHR"])))
     write_piece_lines(part, out.iloc[order], row_ids[order], low[order], high[order], action[order], extras, keys,
                       settings["afs_label"])

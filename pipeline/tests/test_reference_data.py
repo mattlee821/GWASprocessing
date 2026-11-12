@@ -121,3 +121,35 @@ class ValidatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DbsnpMergeBuilderTests(unittest.TestCase):
+    def test_retired_rsids_map_to_the_end_of_their_merge_chain(self):
+        import bz2
+        import json
+
+        import numpy as np
+
+        root = Path(tempfile.mkdtemp())
+        records = [
+            {"refsnp_id": "10", "dbsnp1_merges": [{"merged_rsid": "5"}], "merged_snapshot_data": {"merged_into": ["20"]}},
+            {"refsnp_id": "20", "dbsnp1_merges": [], "merged_snapshot_data": {"merged_into": ["30"]}},  # 10 -> 20 -> 30
+            {"refsnp_id": "40", "dbsnp1_merges": [], "merged_snapshot_data": {"merged_into": ["41", "42"]}},  # ambiguous
+            {"refsnp_id": "50", "dbsnp1_merges": [], "merged_snapshot_data": {"merged_into": ["50"]}},  # self-merge
+            # as dbSNP has rs33969899: its own record says 60 -> 61; 61's record lists 60 as merged earlier and 61 -> 62
+            {"refsnp_id": "61", "dbsnp1_merges": [{"merged_rsid": "60"}], "merged_snapshot_data": {"merged_into": ["62"]}},
+            {"refsnp_id": "60", "dbsnp1_merges": [], "merged_snapshot_data": {"merged_into": ["61"]}},
+            # 70 appears only as an earlier merge of 2 records whose chains end differently: dropped
+            {"refsnp_id": "71", "dbsnp1_merges": [{"merged_rsid": "70"}], "merged_snapshot_data": {"merged_into": ["80"]}},
+            {"refsnp_id": "72", "dbsnp1_merges": [{"merged_rsid": "70"}], "merged_snapshot_data": {"merged_into": ["81"]}},
+        ]
+        source = root / "refsnp-merged.json.bz2"
+        source.write_bytes(bz2.compress("".join(json.dumps(r, separators=(",", ":")) + "\n" for r in records).encode()))
+        out = root / "dbsnp" / "GRCh38"
+        result = run(SRC / "reference_data" / "build_dbsnp_merges.py", "--merged", source, "--out", out)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(np.fromfile(out / "merged_from.u32", dtype="<u4").tolist(), [5, 10, 20, 60, 61, 71, 72])
+        self.assertEqual(np.fromfile(out / "merged_into.u32", dtype="<u4").tolist(), [30, 30, 30, 62, 62, 80, 81])
+        meta = json.loads((out / "merged_meta.json").read_text())
+        self.assertEqual((meta["retired_rsids"], meta["retired_with_more_than_one_target"]), (7, 1))
+        self.assertEqual((meta["retired_with_conflicting_targets"], meta["earlier_merge_disagreeing_with_own_record"]), (1, 0))

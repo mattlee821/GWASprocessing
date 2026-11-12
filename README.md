@@ -53,14 +53,14 @@ bash src/source.sh --r-packages     # only the R packages for the R audit test (
 bash src/source.sh --force          # rebuild lookup tables and the rsID coordinate index
 ```
 
-The reference build downloads about 40 GB (dbSNP 30 GB, 1000 Genomes about 8 GB, 2 FASTAs 2 GB) and builds about 30 GB of lookups. The built references are:
+The reference build downloads about 41 GB (dbSNP 30 GB and its 0.8 GB merge history, 1000 Genomes about 8 GB, 2 FASTAs 2 GB) and builds about 30 GB of lookups. The built references are:
 
 | Path under `references/` | Contents and use | Source |
 |---|---|---|
 | `genome/GRCh38.fa` (+ `.fai`) | GRCh38 primary assembly: REF check, alignment, indel normalisation, liftover target | Ensembl release 113 |
 | `genome/GRCh37.fa` (+ `.fai`) | GRCh37 primary assembly: source genome for BCFtools/liftover only | Ensembl GRCh37 release 113 |
 | `genome/hg19ToHg38.over.chain.gz` | UCSC liftover chain | UCSC |
-| `dbsnp/GRCh38/` | rsID-sorted positions (for inputs with rsIDs and no positions) and position-sorted rsIDs with allele hashes (for the ID column), memory-mapped | NCBI dbSNP build 157 (`GCF_000001405.40`) |
+| `dbsnp/GRCh38/` | rsID-sorted positions (for inputs with rsIDs and no positions) and position-sorted rsIDs with allele hashes (for the ID column), memory-mapped; a merge map from 21.6M retired rsIDs to the current rsID they were merged into | NCBI dbSNP build 157 (`GCF_000001405.40`) and its merge history (`refsnp-merged.json.bz2`) |
 | `1000genomes/GRCh38/` | ALT-allele frequencies of SNVs per super-population (AFR, AMR, EAS, EUR, SAS, ALL), keyed on GRCh38 position, for the 2,504 unrelated phase 3 samples: palindromic strand, AF fill, frequency check | 1000 Genomes 30x GRCh38 (Byrska-Bishop et al. 2022), plink2 resources |
 | `build_detection/` | The same common SNPs placed in GRCh37 and GRCh38, for build detection | 1000 Genomes phase 3 EUR lookup placed in GRCh38 by dbSNP |
 | `1000genomes/phase3/` | GRCh37 lookup and rsID index used when the GRCh38 references above are not installed | 1000 Genomes phase 3 |
@@ -141,7 +141,7 @@ Every input, table or GWAS-VCF, goes through the same steps in this order. The m
 | 6. 1000 Genomes annotation | GRCh38 frequency of the matched population; AF filled where the study has none | Ours |
 | 7. Palindromic SNPs | Strand inferred per variant from study vs 1000 Genomes frequency (tolerance 0.08); ambiguous SNPs kept and marked | TwoSampleMR action 2 |
 | 8. GRCh38 alignment | REF must match the GRCh38 FASTA: keep, swap (negate ES, AF to 1 − AF), complement, or remove; indels checked and left-aligned | gwas2vcf swap, GWAS Catalog strand complementing, bcftools-style normalisation |
-| 9. Duplicates | Same GRCh38 position and allele pair: first in input order kept | Ours |
+| 9. Duplicates | Same GRCh38 position and allele pair: first in input order kept; a record under a current rsID is kept over one under a retired (merged) rsID | Ours |
 | 10. rsIDs | dbSNP GRCh38 rsID matched on position and alleles | OpenGWAS dbSNP annotation; GWAS Catalog matching rule |
 | 11. Write and QC | GWAS-VCF, bgzip, tabix; QC metrics and OpenGWAS QC flags; HTML report | gwas2vcf conventions; opengwas-reports thresholds |
 
@@ -159,7 +159,7 @@ The build is detected from the data in every case. A fixed-seed sample of up to 
 
 ## Coordinates and liftover
 
-- rsIDs without positions: the GRCh38 chromosome and position come straight from dbSNP build 157, so no liftover is involved. rsIDs at more than 1 position in dbSNP are not used.
+- rsIDs without positions: the GRCh38 chromosome and position come straight from dbSNP build 157, so no liftover is involved. rsIDs at more than 1 position in dbSNP are not used. An rsID that dbSNP has retired by merging it into another (rs12016871 into rs9581854 in build 131) takes the position of the current rsID (21.6M retired rsIDs are mapped): INFO/SNPID keeps the study's rsID, and the ID column carries the current one, since it is matched on position and alleles. The step log counts these. Without the merge map (`src/reference_data/build_dbsnp_merges.py`) such rows are removed and a warning says so.
 - GRCh37 positions are lifted with BCFtools/liftover (Genovese et al. 2024, [BCFtools/liftover: an accurate and comprehensive tool to convert genetic variants across genome assemblies](https://doi.org/10.1093/bioinformatics/btae038)), which drops fewer variants than position-only tools, handles indels, and swaps alleles where the reference allele changed between builds. Alleles are first oriented to the GRCh37 FASTA (REF must match the source genome), then lifted with both FASTAs and the UCSC chain; the effect allele is followed through allele swaps and minus-strand blocks. Variants that cannot be lifted are counted by the tool's reason, and so are variants whose alleles do not match GRCh37 and those where GRCh38 has a third allele. Without the plugin or the GRCh37 FASTA, pyliftover lifts positions only.
 
 ## Reference alignment

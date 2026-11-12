@@ -425,9 +425,11 @@ def without_appledouble(paths: Iterable[Path]) -> list[Path]:
 
 
 def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
-    """Size and mtime of every reference file that can change outputs (lookups, coordinate index, chains, FASTA)."""
+    """Size and mtime of every reference file that can change outputs (GRCh38 dbSNP index and merge map, 1000 Genomes
+    frequencies, build-detection sample, legacy lookups and coordinate index, chains, FASTA)."""
     root = Path(reference_root)
-    patterns = ["1000genomes/phase3/lookup/*.tsv*", "1000genomes/phase3/coordinates/*.npy",
+    patterns = ["dbsnp/GRCh38/*.json", "dbsnp/GRCh38/merged_*.u32", "1000genomes/GRCh38/*", "build_detection/*",
+                "1000genomes/phase3/lookup/*.tsv*", "1000genomes/phase3/coordinates/*.npy",
                 "genome/*.chain*", "genome/*.fa", "genome/*.fasta"]
     identity: dict[str, list[int]] = {}
     for pattern in patterns:

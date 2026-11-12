@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 CAUSE_TEXT = {
-    "rsid_not_in_coordinate_index": "no position in the file and the rsID is not in the coordinate index",
+    "rsid_not_in_coordinate_index": "no position in the file and the rsID is not in dbSNP (current or merged rsIDs)",
     "no_position_or_rsid": "no position in the file and no rsID to look one up",
     "liftover_to_grch38_failed": "GRCh37 position could not be lifted to GRCh38",
     "chromosome_not_primary": "chromosome is not 1-22, X, Y or MT",
@@ -108,6 +108,7 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                  {"positions parsed from chr:pos identifiers": _n(qc.get("positions_from_variant_ids")),
                   "GRCh37 position looked up by rsID (1000 Genomes)": _n(fills.get("POS19")),
                   "GRCh38 position looked up by rsID (dbSNP, no liftover)": _n(fills.get("POS38")),
+                  "of which the study rsID was merged into a current dbSNP rsID": _n(fills.get("POS38_merged_rsid")),
                   f"lifted from GRCh37 to GRCh38{' (BCFtools/liftover)' if lift.get('tool') else ''}": _n(lift.get("ok")),
                   "alleles complemented after a minus-strand liftover": _n(lift.get("minus_strand")),
                   "alleles swapped between builds (reference allele changed)": _n(lift.get("swapped_between_builds"))}, notes)
@@ -132,7 +133,7 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                   "ambiguous: no study-reported frequency": _n(pal.get("ambiguous_no_study_eaf"))},
                  [f"palindromic SNPs: {_n(pal.get('palindromic_total')):,}"])
     rows = _step(steps, rows, "Duplicates",
-                 "Records with the same GRCh38 chromosome, position and allele pair; the first in input order is kept.",
+                 "Records with the same GRCh38 chromosome, position and allele pair; the first in input order is kept, except that a record under a current rsID is kept over one under an rsID dbSNP has merged into it.",
                  {"duplicate of an earlier record": _n(qc.get("duplicates_removed"))})
     alignment = qc.get("reference_alignment", {}) or {}
     if alignment.get("performed"):

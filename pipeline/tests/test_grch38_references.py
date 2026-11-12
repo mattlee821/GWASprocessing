@@ -87,6 +87,28 @@ class Grch38ReferenceTests(unittest.TestCase):
         self.assertEqual(result.qc["incomplete_by_cause"]["rsid_not_in_coordinate_index"]["rows"], 1)
         self.assertEqual(result.sample["AFFilled"], "1")
 
+    def test_rsids_merged_in_dbsnp_take_the_position_of_the_current_rsid(self):
+        write_grch38_references(self.reference, self.variants, merges={9000: 5002, 9001: 5003, 9002: 999998, 9003: 5004})
+        rows = [[f"rs{v[2]}", v[4], v[3], 0.3, 0.1, 0.02, 1e-6, 5000] for v in self.variants]
+        rows[2][0], rows[3][0] = "rs9000", "rs9001"  # the study used retired rsIDs for 2 variants
+        rows.append(["rs9002", "A", "G", 0.3, 0.1, 0.02, 1e-6, 5000])  # merged into an rsID that is not in the index
+        v4 = self.variants[4]
+        rows.insert(0, ["rs9003", v4[4], v4[3], 0.3, 0.5, 0.02, 1e-6, 4000])  # also reported under its current rsID, later
+        result = run_standardise(self.tmp, write_table(self.tmp / "merged.tsv", HEADER, rows), self.reference, ancestry="EUR")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        by_id = result.by_id()
+        self.assertEqual(len(by_id), 30)
+        moved = by_id["rs5002"]
+        self.assertEqual((moved["CHROM"], moved["POS"], moved["INFO"]["SNPID"], moved["FORMAT"]["ID"]),
+                         ("1", self.variants[2][1], "rs9000", "rs5002"))
+        self.assertEqual(by_id["rs5003"]["INFO"]["SNPID"], "rs9001")
+        # the row under the current rsID is kept over the earlier one under the retired rsID
+        self.assertEqual((by_id["rs5004"]["INFO"]["SNPID"], abs(float(by_id["rs5004"]["FORMAT"]["ES"]))), ("rs5004", 0.1))
+        self.assertEqual(result.qc["duplicates_removed"], 1)
+        self.assertEqual(result.qc["reference_fills"]["POS38"], 31)
+        self.assertEqual(result.qc["reference_fills"]["POS38_merged_rsid"], 3)
+        self.assertEqual(result.qc["incomplete_by_cause"]["rsid_not_in_coordinate_index"]["rows"], 1)
+
     def test_ids_come_from_dbsnp_matched_on_position_and_alleles(self):
         header = ["CHR", "POS", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P"]
         rows = [[1, v[1] - OFFSET, f"1:{v[1] - OFFSET}", v[4], v[3], 0.3, 0.1, 0.02, 1e-6] for v in self.variants]

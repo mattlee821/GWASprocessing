@@ -96,7 +96,31 @@ class Dbsnp:
         self.rs = _memmap(self.root / "rs.u32", "<u4")
         self.rs_chrom = _memmap(self.root / "rs_chrom.u8", "u1")
         self.rs_pos = _memmap(self.root / "rs_pos.u32", "<u4")
+        self.merged_from = _memmap(self.root / "merged_from.u32", "<u4")
+        self.merged_into = _memmap(self.root / "merged_into.u32", "<u4")
         self._chrom: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
+
+    @property
+    def has_merges(self) -> bool:
+        return len(self.merged_from) > 0
+
+    def current_rsids(self, rs_numbers: np.ndarray) -> np.ndarray:
+        """The current rsID number for each retired (merged) rsID number, from build_dbsnp_merges.py; 0 when the rsID
+        was never merged or the merge map is not built."""
+        rs_numbers = np.asarray(rs_numbers, dtype="int64")
+        out = np.zeros(len(rs_numbers), dtype="int64")
+        valid = (rs_numbers > 0) & (rs_numbers < 2 ** 32)
+        if not valid.any() or not self.has_merges:
+            return out
+        query = rs_numbers[valid].astype("uint32")
+        order = np.argsort(query, kind="stable")
+        if not hasattr(self, "_merged_coarse"):
+            self._merged_coarse = coarse_index(self.merged_from)
+        idx = np.minimum(searchsorted_blocked(self.merged_from, self._merged_coarse, query[order]), len(self.merged_from) - 1)
+        found = np.asarray(self.merged_from[idx]) == query[order]
+        rows = np.where(valid)[0][order]
+        out[rows[found]] = np.asarray(self.merged_into[idx[found]], dtype="int64")
+        return out
 
     @classmethod
     def find(cls, reference_root: str | Path) -> "Dbsnp | None":

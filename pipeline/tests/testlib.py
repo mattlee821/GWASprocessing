@@ -90,11 +90,12 @@ def write_fasta(genome_dir: Path, sequences: dict[str, str], name: str = "GRCh38
 
 
 def write_grch38_references(root: Path, variants: list[tuple], populations: tuple[str, ...] = ("EUR", "ALL"),
-                            paired: list[tuple] | None = None) -> Path:
+                            paired: list[tuple] | None = None, merges: dict[int, int] | None = None) -> Path:
     """GRCh38 reference arrays as the src/reference_data builders write them.
 
     variants: (chrom, pos38, rs number, REF, ALT, ALT frequency) -> dbsnp/GRCh38 and 1000genomes/GRCh38 for each
-    population; paired: (chrom, pos37, pos38, REF, ALT) -> build_detection sample."""
+    population; paired: (chrom, pos37, pos38, REF, ALT) -> build_detection sample; merges: {retired rs number: current
+    rs number} -> dbsnp/GRCh38/merged_{from,into}.u32."""
     import numpy as np
     import gwas_reference as ref
 
@@ -111,6 +112,10 @@ def write_grch38_references(root: Path, variants: list[tuple], populations: tupl
     np.array([r[1] for r in by_rs], dtype="u1").tofile(db / "rs_chrom.u8")
     np.array([r[2] for r in by_rs], dtype="<u4").tofile(db / "rs_pos.u32")
     (db / "meta.json").write_text(json.dumps({"dbsnp_build": "test", "version": 1}), encoding="utf-8")
+    if merges:
+        retired = sorted(merges)
+        np.array(retired, dtype="<u4").tofile(db / "merged_from.u32")
+        np.array([merges[r] for r in retired], dtype="<u4").tofile(db / "merged_into.u32")
     kg = root / "1000genomes" / "GRCh38"
     kg.mkdir(parents=True, exist_ok=True)
     snvs = [v for v in rows if len(v[3]) == 1 and len(v[4]) == 1 and 0 < v[5] < 1]
