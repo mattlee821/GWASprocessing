@@ -205,7 +205,7 @@ The VCF follows GWAS-VCF specification 1.0.0 as gwas2vcf writes it, so R gwasvcf
 | `INFO/HM` | what was done to the study's alleles: `forward` (as reported), `swapped` (effect allele was the GRCh38 reference base: ES negated, AF to 1 − AF), `complemented` (alleles on the other strand from the study's, whether from the study's reporting strand or a minus-strand liftover), `complemented_swapped`, `unverified` (no reference sequence at the position), or for palindromic SNPs `palindrome_forward`, `palindrome_complemented`, `palindrome_ambiguous`, `palindrome_ambiguous_complemented` (strand not inferable, but liftover complemented the alleles on a minus-strand block), each with `_swapped` when the alleles were then swapped |
 | `FORMAT/ES`, `SE` | effect size relative to ALT (log OR for binary traits), its standard error |
 | `FORMAT/LP` | −log10 P; recover `P = 10^(−LP)` |
-| `FORMAT/AF` | ALT frequency: study-reported, else the 1000 Genomes frequency of the matched population |
+| `FORMAT/AF` | ALT frequency: study-reported (written as given, up to 8 significant digits), else the 1000 Genomes frequency of the matched population (6 significant digits, the precision it is stored at) |
 | `FORMAT/AFS` | source of AF: `study`, or `1000G_<POP>` (for example `1000G_EUR`) |
 | `FORMAT/SS`, `NC`, `EZ`, `SI` | per-variant sample size, cases, Z-score, imputation accuracy; written only when the data have them |
 | `FORMAT/ID` | the rsID, as in the ID column (`.` without one) |

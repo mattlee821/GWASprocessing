@@ -27,7 +27,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         rows = result.rows
         self.assertEqual([r["ID"] for r in rows], ["rs3", "."])
-        self.assertEqual((rows[0]["FORMAT"]["AF"], rows[0]["FORMAT"]["AFS"][:6]), ("0.33000001", "1000G_"))
+        self.assertEqual((rows[0]["FORMAT"]["AF"], rows[0]["FORMAT"]["AFS"][:6]), ("0.33", "1000G_"))
         self.assertEqual(rows[1]["FORMAT"]["AF"], ".")
         self.assertEqual((result.qc["rsid_dbsnp"]["matched"], result.qc["reference_fills"]["EAF"]), (1, 1))
 
@@ -97,8 +97,8 @@ class ReviewRegressionTests(unittest.TestCase):
                           [[1, 1100, "rs10", "A", "G", 0.1, 0.02, 1e-6, 5000], [1, 1200, "rs11", "G", "A", 0.1, 0.02, 1e-6, 5000]])
         rows = run_standardise(self.tmp, raw, ref, input_build="hg38").by_snpid()
         # 1000 Genomes frequencies are stored as float32
-        self.assertEqual((round(float(rows["rs10"]["FORMAT"]["AF"]), 6), rows["rs10"]["FORMAT"]["AFS"][:6]), (0.8, "1000G_"))
-        self.assertEqual(round(float(rows["rs11"]["FORMAT"]["AF"]), 6), 0.8)
+        self.assertEqual((rows["rs10"]["FORMAT"]["AF"], rows["rs10"]["FORMAT"]["AFS"][:6]), ("0.8", "1000G_"))
+        self.assertEqual(rows["rs11"]["FORMAT"]["AF"], "0.8")
 
     def test_palindrome_with_reference_filled_frequency_is_kept_ambiguous_not_flipped(self):
         ref = self.reference([("1", "rs20", 2000, "A", "T", 0.8), ("1", "rs21", 2100, "A", "G", 0.3)])

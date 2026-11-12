@@ -70,7 +70,7 @@ class Grch38ReferenceTests(unittest.TestCase):
         self.assertEqual(len(by_id), 30)
         first = by_id["rs5000"]
         self.assertEqual((first["CHROM"], first["POS"], first["REF"], first["ALT"]), ("1", 1000, self.variants[0][3], self.variants[0][4]))
-        self.assertEqual((first["FORMAT"]["AF"], first["FORMAT"]["AFS"], first["FORMAT"]["ID"]), ("0.30000001", "1000G_EUR", "rs5000"))
+        self.assertEqual((first["FORMAT"]["AF"], first["FORMAT"]["AFS"], first["FORMAT"]["ID"]), ("0.3", "1000G_EUR", "rs5000"))
         self.assertEqual(by_id["rs5001"]["FORMAT"]["AFS"], "study")
         self.assertEqual(result.qc["coordinate_source"], "dbsnp")
         self.assertEqual(result.qc["reference_fills"]["POS38"], 30)

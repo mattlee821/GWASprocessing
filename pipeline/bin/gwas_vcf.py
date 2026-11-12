@@ -177,12 +177,19 @@ def table_header(record: dict[str, Any], extras: Iterable[str], keys: list[str],
     ]
 
 
-def _fmt_float(values: Any) -> np.ndarray:
+def _fmt_float(values: Any, digits: Any = 8) -> np.ndarray:
+    """Values with `digits` significant digits (a number, or 1 per value); '.' where missing."""
     arr = numeric_series(pd.Series(values)).to_numpy(dtype="float64")
+    digits = np.broadcast_to(np.asarray(digits, dtype=int), arr.shape)
     out = np.full(arr.shape, ".", dtype=object)
     finite = np.isfinite(arr)
-    out[finite] = [f"{v:.8g}" for v in arr[finite]]
+    out[finite] = [f"{v:.{d}g}" for v, d in zip(arr[finite], digits[finite])]
     return out
+
+
+# 1000 Genomes frequencies are stored as float32 (about 7 significant digits); 6 keeps the written value free of
+# float32 noise (0.87449801 is written 0.874498)
+REFERENCE_AF_DIGITS = 6
 
 
 def _fmt_int(values: Any) -> np.ndarray:
@@ -209,7 +216,7 @@ def table_body_lines(df: pd.DataFrame, extras: Iterable[str], keys: list[str], a
         values = [info_value(v) for v in df[name]] if name in df.columns else ["."] * len(df)
         info = info + np.array([f";{info_key(name)}={v}" for v in values], dtype=object)
     source = df["EAF_SOURCE"].fillna("").astype(str).to_numpy() if "EAF_SOURCE" in df.columns else np.full(len(df), "")
-    af = _fmt_float(df["EAF"])
+    af = _fmt_float(df["EAF"], np.where(source == "reference", REFERENCE_AF_DIGITS, 8))
     afs = np.where(af == ".", ".", np.where(source == "reference", afs_label, "study")).astype(object)
     columns = {"ES": _fmt_float(df["BETA"]), "SE": _fmt_float(df["SE"]), "LP": _fmt_float(df["LP"]), "AF": af, "AFS": afs,
                "ID": ids}

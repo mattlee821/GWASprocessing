@@ -88,6 +88,14 @@ class BodyTests(unittest.TestCase):
         self.assertEqual((rows[1]["FORMAT"]["AF"], rows[1]["FORMAT"]["AFS"], rows[1]["FORMAT"]["SS"]), ("0.8", "1000G_EUR", "."))
         self.assertEqual((rows[2]["FORMAT"]["LP"], rows[2]["FORMAT"]["AF"], rows[2]["FORMAT"]["AFS"], rows[2]["FORMAT"]["ID"]),
                          (".", ".", ".", "."))
+
+    def test_filled_frequencies_are_written_with_6_significant_digits_and_study_ones_unchanged(self):
+        # 1000 Genomes frequencies arrive as float32, so 0.8744980 reads back as 0.87449801
+        filled = [float(np.float32(0.874498)), float(np.float32(0.3)), float(np.float32(0.0592369))]
+        df = table(EAF=filled + [0.123456789], EAF_SOURCE=["reference", "reference", "reference", "input"])
+        rows = parse_vcf_rows("\n".join(gwas_vcf.table_body_lines(df, [], KEYS, "1000G_EUR")))
+        self.assertEqual([r["FORMAT"]["AF"] for r in rows], ["0.874498", "0.3", "0.0592369", "0.12345679"])
+        self.assertEqual([r["FORMAT"]["AFS"] for r in rows], ["1000G_EUR", "1000G_EUR", "1000G_EUR", "study"])
         self.assertEqual((rows[0]["REF"], rows[0]["ALT"]), ("G", "A"))
 
     def test_rows_sort_in_numeric_chromosome_order(self):
