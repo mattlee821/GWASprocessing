@@ -39,6 +39,8 @@ load_settings() {
 # plugins built into it, and point Java at the environment's (NXF_JAVA_HOME, if set, still wins for Nextflow). Inside the container image (GWAS_IN_CONTAINER=1) the image's own tools are used instead.
 activate_tools() {
   local env="${GWAS_ENV:-}"
+  # Python uses the tool environment's packages only, never ones installed in the user's ~/.local
+  export PYTHONNOUSERSITE=1
   [[ -n "${GWAS_IN_CONTAINER:-}" || -z "${env}" ]] && return 0
   [[ "${env}" == /* ]] || env="$1/${env}"
   [[ -d "${env}/bin" ]] || return 0

@@ -29,12 +29,16 @@ RUN set -eux; \
     bcftools plugin -l | grep -qx liftover
 
 USER root
+# Nextflow needs ps (procps) inside the container to collect task metrics; without it every task fails.
+RUN apt-get update && apt-get install -y --no-install-recommends procps && rm -rf /var/lib/apt/lists/* && ps --version
 COPY . /opt/GWASprocessing
 RUN chmod -R a+rX /opt/GWASprocessing
 USER $MAMBA_USER
 
-# The scripts use the image's tools, not a host tool environment named in .env.
+# The scripts use the image's tools, not a host tool environment named in .env, and Python ignores packages in the
+# user's ~/.local (Apptainer mounts the home folder), so only the image's own packages are used.
 ENV GWAS_IN_CONTAINER=1 \
+    PYTHONNOUSERSITE=1 \
     PATH=/opt/conda/bin:$PATH \
     BCFTOOLS_PLUGINS=/opt/conda/libexec/bcftools
 WORKDIR /opt/GWASprocessing
