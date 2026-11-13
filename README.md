@@ -1,97 +1,117 @@
 # GWASprocessing
 
-GWASprocessing turns GWAS summary statistics into a standardised GRCh38 GWAS-VCF (specification 1.0.0). It takes a manifest of studies from the GWAS Catalog, OpenGWAS, a URL or a local file, detects the genome build, places every variant on GRCh38, aligns alleles to the reference genome, resolves strand, annotates dbSNP rsIDs, and writes 1 VCF per GWAS. Standardisation does not QC the data; variants are removed only when they cannot be placed, aligned or read, or are exact duplicates. A log file accounts for all actions. It runs under Nextflow on a Mac or a SLURM cluster, and 1 setup script installs its tools and builds its reference data.
+GWASprocessing turns GWAS summary statistics into a standardised GRCh38 GWAS-VCF (specification 1.0.0). It takes a manifest of studies from the GWAS Catalog, OpenGWAS, a URL, or a local file, detects the genome build, places every variant on GRCh38, aligns alleles to the reference genome, resolves strand, annotates dbSNP rsIDs, and writes 1 VCF per GWAS. Standardisation does not QC the data; variants are removed only when they cannot be placed, aligned, read, or are exact duplicates. A log file accounts for all actions. It runs under Nextflow on a Mac or a SLURM cluster, and 1 setup script installs its tools and builds its reference data.
 
 ## Installation
 
-You need bash, curl and git (on a Mac, install the Command Line Tools with `xcode-select --install`), and about 75 GB of free disk for the reference data. Setup installs everything else (Java, Nextflow, Python, bcftools with the liftover plugin, plink2, bgzip and tabix) into a private environment inside the repository.
+You need bash, curl, and git (on a Mac, install the Command Line Tools with `xcode-select --install`), and about 75 GB of free disk for the reference data. Step 4 installs everything else.
 
-1. Clone the repository:
+#### 1. Clone the repository
 
 ```bash
 git clone https://github.com/mattlee821/GWASprocessing.git
 cd GWASprocessing
 ```
 
-2. Run setup. It installs the tools (a few minutes), then downloads about 41 GB of reference data and builds about 30 GB of lookups (several hours). It is safe to rerun: every step skips work that is already done.
+#### 2. Choose local tools or a container
 
-```bash
-bash src/source.sh
-```
+Both routes use the same repository, setup script, manifests and commands; they differ only in where the tools that process the data come from. Choose 1 and use its command in step 4.
 
-3. Add your OpenGWAS token to `.env` (needed only for OpenGWAS sources; generate one at [api.opengwas.io/profile](https://api.opengwas.io/profile/)):
+| Route | Use it when | What step 4 installs |
+|---|---|---|
+| Local tools (default) | on a Mac, or on a cluster without Apptainer | Java, Nextflow, Python, bcftools with the liftover plugin, plink2, bgzip and tabix, in 1 private environment under `.tools/` (or `GWAS_TOOLS_ROOT`); no administrator rights needed |
+| Container | on a cluster with Apptainer (`module load apptainer` first if your cluster uses modules), or on a machine with Docker | the published image `ghcr.io/mattlee821/gwasprocessing`, inside which every pipeline step runs, plus a small local environment with Nextflow and Java to launch them |
 
-```bash
-OPENGWAS_JWT=your-token
-```
+#### 3. Choose where the data go (optional)
 
-4. Run the tests (about 3 minutes); they must all pass:
+The reference data (about 41 GB of downloads and 30 GB of lookups), the GWAS outputs and the temporary files live outside the repository. By default they go in folders inside the repository, or in `~/GWASprocessing-data` when the repository is in a cloud-synced folder. To put them somewhere else, start the setup command in step 4 with `GWAS_DATA_HOME=/path`, or edit the paths in `.env` after setup:
 
-```bash
-bash src/test.sh
-```
-
-5. Run the benchmark (about 50 minutes the first time); it must end with `Result: PASS`:
-
-```bash
-bash src/benchmark.sh
-```
-
-### Settings
-
-Setup creates `.env` from [.env.example](.env.example) and fills it in. Only these may need your attention:
-
-| Setting in `.env` | When to set it |
+| Setting in `.env` | Holds |
 |---|---|
-| `OPENGWAS_JWT` | always, for OpenGWAS sources |
-| `GWAS_WORK_ROOT`, `GWAS_REFERENCE_ROOT`, `GWAS_TEMP_ROOT` (and the log and Nextflow paths under it) | when the default data folders do not suit you. They default to folders inside the repository, or to `~/GWASprocessing-data` when the repository is in a cloud-synced folder. To choose another place before setup, run `GWAS_DATA_HOME=/path bash src/source.sh`. Keep them on local or scratch storage: the references are read at random positions on every run |
-| `GWAS_REFERENCE_RAW_ROOT` | to keep the 41 GB of raw reference downloads on a slow or external drive (they are read once) |
-| `GWAS_WORKERS` | to standardise more pieces of a file at once on 1 machine (about 2 GB of memory each) |
+| `GWAS_WORK_ROOT` | the GWAS outputs and `manifest.html` |
+| `GWAS_REFERENCE_ROOT` | the built reference lookups, read at random positions on every run |
+| `GWAS_TEMP_ROOT` (with `GWAS_LOG_ROOT`, `GWAS_NEXTFLOW_WORK`, `GWAS_NEXTFLOW_LOG`) | logs and Nextflow work files |
+| `GWAS_REFERENCE_RAW_ROOT` | the raw reference downloads, read once while the references are built, so a slow or external drive will do |
 
-Setup writes the tool locations (`GWAS_ENV`, `NEXTFLOW`, `PLINK2`, `GWAS_BCFTOOLS`, `BCFTOOLS_PLUGINS`) itself; a value you set is kept. `.env` is not tracked by git, and `.env.example` is never read by the scripts.
+Keep the first 3 on local or scratch storage, and avoid cloud-synced folders.
 
-### Container
-
-On a cluster with Apptainer, or a machine with Docker, the pipeline steps can run inside the published image (`ghcr.io/mattlee821/gwasprocessing`) instead of the local tools:
+#### 4. Run setup
 
 ```bash
-bash src/source.sh --container apptainer   # or docker; on a cluster, module load apptainer first if needed
+bash src/source.sh                        # local tools
+bash src/source.sh --container apptainer  # container, with Apptainer
+bash src/source.sh --container docker     # container, with Docker
 ```
 
-Setup pulls the image, records it in `.env` (`GWAS_CONTAINER`, `GWAS_CONTAINER_IMAGE`) and builds the references inside it; every later run uses it. Empty `GWAS_CONTAINER` in `.env` to return to the local tools.
-
-### Setup options
+Setup creates `.env` from [.env.example](.env.example), installs the tools of the chosen route (a few minutes) and writes their locations to `.env`, then downloads and builds the reference data (several hours). It is safe to rerun: every step skips work that is already done. To leave the container route later, empty `GWAS_CONTAINER` in `.env`. Parts of setup can be run alone:
 
 ```bash
 bash src/source.sh --env-only        # only create or complete .env
 bash src/source.sh --tools-only      # only install or update the tools
 bash src/source.sh --reference-only  # only download and build the reference data
-bash src/source.sh --force           # rebuild the reference lookups (and re-pull the image)
+bash src/source.sh --force           # rebuild the reference lookups (and pull the image again)
 bash src/source.sh --r-packages      # gwasvcf for the optional R reader test (needs R installed)
+```
+
+#### 5. Add your OpenGWAS token and review the settings
+
+Add your OpenGWAS token to `.env`; it is needed only for OpenGWAS sources (generate one at [api.opengwas.io/profile](https://api.opengwas.io/profile/)):
+
+```bash
+OPENGWAS_JWT=your-token
+```
+
+`GWAS_WORKERS` sets how many pieces of a GWAS are standardised at once on 1 machine, about 2 GB of memory each – essentially how many parallel workers you want to use per GWAS. Setup fills in everything else, including the tool locations (`GWAS_ENV`, `NEXTFLOW`, `PLINK2`, `GWAS_BCFTOOLS`, `BCFTOOLS_PLUGINS`, and `GWAS_CONTAINER` and `GWAS_CONTAINER_IMAGE` for the container route); a value you set yourself is kept. `.env` is not tracked by git.
+
+#### 6. Run the tests
+
+About 4 minutes; they must all pass.
+
+```bash
+bash src/test.sh
+```
+
+#### 7. Run the benchmark
+
+About 50 minutes the first time; it must end with `Result: PASS`. It standardises the 4 rows of `manifests/test.tsv` and compares them with the values stored in `src/benchmark/expected/` (see [GWAS comparison](#gwas-comparison)).
+
+```bash
+bash src/benchmark.sh
 ```
 
 ## Usage
 
-1. Write a manifest: a tab-separated file with 1 row per GWAS. [manifests/test.tsv](manifests/test.tsv), the benchmark, is the example:
+#### 1. Write a manifest
+
+A manifest is a tab-separated file with 1 row per GWAS. Copy [manifests/test.tsv](manifests/test.tsv), the benchmark, which fills in every column:
 
 ```text
-GWAS_location	phenotype	ancestry	author	year	PMID	study_yaml
-https://www.ebi.ac.uk/gwas/studies/GCST002783	BMI	EUR	Locke	2015	25673413
-https://opengwas.io/datasets/ebi-a-GCST002783	BMI	EUR	Locke	2015	25673413
-https://www.ebi.ac.uk/gwas/studies/GCST006464	endometrial cancer	EUR	OMara	2018	30093612	manifests/omara_2018_30093612.yaml
-https://opengwas.io/datasets/ebi-a-GCST006464	endometrial cancer	EUR	OMara	2018	30093612	manifests/omara_2018_30093612.yaml
+GWAS_location	phenotype	ancestry	sex	author	year	PMID	source_type	input_build	population	delimiter	format	study_yaml
+https://www.ebi.ac.uk/gwas/studies/GCST002783	BMI	ALL	combined	Locke	2015	25673413	gwas_catalog	hg19	EUR	tab	table	
+https://opengwas.io/datasets/ebi-a-GCST002783	BMI	ALL	combined	Locke	2015	25673413	opengwas	hg19	EUR		vcf	
+https://www.ebi.ac.uk/gwas/studies/GCST006464	endometrial cancer	EUR	female	OMara	2018	30093612	gwas_catalog	hg19	EUR	tab	table	manifests/omara_2018_30093612.yaml
+https://opengwas.io/datasets/ebi-a-GCST006464	endometrial cancer	EUR	female	OMara	2018	30093612	opengwas	hg19	EUR		vcf	manifests/omara_2018_30093612.yaml
 ```
 
-| Column | Content |
-|---|---|
-| `GWAS_location` | a GWAS Catalog study URL or accession, an OpenGWAS dataset URL or ID, a URL (`https://`, `s3://`, `gs://`) or a local file |
-| `phenotype`, `author`, `year`, `PMID` | written to the VCF header; `author`, `year` and `PMID` name the study folder (`locke_2015_25673413`) |
-| `ancestry` | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL` (labels such as `European` are accepted). Choose the population of the file's allele frequencies: palindromic SNPs are resolved against it, so Locke, whose frequencies come from HapMap CEU, is `EUR` |
-| optional | `sex`, `study_yaml`, and, only when automatic detection fails, `source_type`, `input_build`, `population`, `delimiter`, `format` |
+| Column | Required | Values | Meaning |
+|---|---|---|---|
+| `GWAS_location` | yes | a GWAS Catalog study URL or accession (`GCST002783`); an OpenGWAS dataset URL or ID (`ebi-a-GCST002783`); a URL (`https://`, `ftp://`, `s3://`, `gs://`); a local file path | where the summary statistics are |
+| `phenotype` | yes | text | the trait, written to the VCF header |
+| `ancestry` | yes | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL` (`European`, `East Asian` and similar labels are accepted; `ALL` for a multi-ancestry GWAS) | the ancestry of the GWAS sample, written to the VCF header; it also chooses the 1000 Genomes population unless `population` is set |
+| `sex` | no | `combined`, `male` or `female` | the sex of the GWAS sample, written to the VCF header (`NA` when empty) |
+| `author`, `year`, `PMID` | yes | first author's surname, publication year, PubMed ID | written to the VCF header, and together name the study folder (`locke_2015_25673413`) |
+| `source_type` | no | `gwas_catalog`, `opengwas`, `direct_url`, `local`, `s3`, `gs` | how the file is fetched. It is worked out from `GWAS_location`; set it only when that goes wrong, for example a local file whose name looks like an OpenGWAS ID |
+| `input_build` | no | `hg19` (GRCh37) or `hg38` (GRCh38) | the genome build of the file's positions. The build is detected from the data; this value is used only when detection fails, and a value that contradicts the data is reported and ignored |
+| `population` | no | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL` | the 1000 Genomes population whose allele frequencies are compared with the study's, to resolve the strand of palindromic SNPs, fill missing frequencies and check the effect allele. It defaults to `ancestry`; set it when the file's frequency column comes from another population. Locke is an all-ancestry meta-analysis (`ancestry` `ALL`) whose frequencies come from HapMap CEU, so its `population` is `EUR` |
+| `delimiter` | no | `tab`, `comma`, `space` (any run of spaces or tabs), or the character itself | the column separator of a table. It is detected from the header when empty; leave it empty for a VCF |
+| `format` | no | `table` or `vcf` | whether the file is a table of summary statistics or a GWAS-VCF (OpenGWAS files are GWAS-VCFs). It is detected from the file when empty |
+| `study_yaml` | no | a path, relative to the repository or to `manifests/` | a study YAML with settings for this GWAS (step 2); empty when the file needs none |
 
-2. Add a study YAML when a file needs help, and name it in `study_yaml`. [manifests/omara_2018_30093612.yaml](manifests/omara_2018_30093612.yaml) is the example: it sets the case and control counts the endometrial cancer study needs, and lists every other key (column names, build, joins, exclusions, extra INFO columns) as a commented line.
+#### 2. Add a study YAML when a file needs help
 
-3. Run it:
+A study YAML holds settings that a manifest row cannot: column names the pipeline does not recognise, case and control counts, joins with other files, rows to exclude, extra columns to keep. Every key is optional, so a YAML holds only what its study needs. [manifests/omara_2018_30093612.yaml](manifests/omara_2018_30093612.yaml) is the example: it sets the case and control counts of the endometrial cancer GWAS, which the file does not carry, and lists every other key as a commented line with what it does.
+
+#### 3. Run it
 
 ```bash
 bash src/standardise.sh --manifest manifests/test.tsv --row-limit 0   # every row not yet complete
@@ -102,7 +122,9 @@ bash src/standardise.sh --report false                                # no HTML 
 sbatch src/standardise.sh --manifest manifests/test.tsv               # SLURM: every row, 1 job each
 ```
 
-4. Open `<GWAS_WORK_ROOT>/manifest.html`. It lists every GWAS this install has processed or tried to, with its manifest fields, status, variants in and out, sample size, QC flags, warnings and links to its folder, VCF and report, and is updated at the end of every run. Each GWAS has its own folder, `<GWAS_WORK_ROOT>/<STUDYID>/standardise/<SOURCE_ID>/` (for example `locke_2015_25673413/standardise/GWAScatalog_GCST002783/`):
+#### 4. Check what has been processed
+
+Open `<GWAS_WORK_ROOT>/manifest.html`. It lists every GWAS this install has processed or tried to, with its manifest fields, status, variants in and out, sample size, QC flags, warnings and links to its folder, VCF and report, and is updated at the end of every run. Each GWAS has its own folder, `<GWAS_WORK_ROOT>/<STUDYID>/standardise/<SOURCE_ID>/` (for example `locke_2015_25673413/standardise/GWAScatalog_GCST002783/`):
 
 ```text
 standardised.gwas.vcf.gz       the GWAS-VCF, with its tabix index (.tbi)
@@ -111,9 +133,11 @@ standardised.metadata.json     study metadata
 standardised.report.html       self-contained report: steps, flags, QQ plots
 ```
 
-5. Rerun when something changes. A completed row is skipped while its outputs exist and its settings are unchanged (manifest row, study YAML, reference files, pipeline output version); a change reruns it. A row whose file is unusable fails without stopping the others, and the run lists failed rows at the end. To make a report for 1 GWAS processed with `--report false`: `python3 pipeline/bin/report.py --dir <GWAS folder>`.
+#### 5. Rerun when something changes
 
-6. Read a VCF in R:
+A completed row is skipped while its outputs exist and its settings are unchanged (manifest row, study YAML, reference files, pipeline output version); a change reruns it. A row whose file is unusable fails without stopping the others, and the run lists failed rows at the end. To make a report for 1 GWAS processed with `--report false`: `python3 pipeline/bin/report.py --dir <GWAS folder>`.
+
+#### 6. Read a VCF in R
 
 ```r
 vcf <- gwasvcf::readVcf(file)
@@ -139,7 +163,6 @@ df <- data.frame(CHR = as.character(stats$seqnames), POS = stats$start, SNP = st
 | 11. rsIDs | dbSNP rsID matched on position and both alleles | dbSNP build 157 |
 | 12. Write and report | GWAS-VCF, index, step log, QC flags, HTML report, manifest page | gwas2vcf conventions; OpenGWAS QC thresholds |
 
-## Pipeline in detail
 
 ### 1. Stage
 
@@ -191,9 +214,9 @@ The ID column is the dbSNP build 157 rsID matched on GRCh38 position and both al
 
 Records are sorted, compressed with bgzip and indexed with tabix. The step log in `standardised.qc.json`, also printed to the run log, gives every step's rows in, rows removed by reason and changes made, and the counts reconcile from input rows to written rows. The QC flags follow the OpenGWAS report thresholds and never stop a row: frequency correlation with 1000 Genomes below 0.7, lambda GC above 1.2, maximum sample size below 10,000, mean effect above 0.5 or 0.1 in absolute value, and more than 1,000 variants at P < 5e-8. The HTML report holds the step table, flags, header counts, raw and standardised QQ plots, warnings and timings in 1 self-contained file. `manifest.html` in the work root summarises every GWAS of the install, and keeps failed rows listed until they complete.
 
-### Output columns
+## Output columns
 
-The VCF follows GWAS-VCF 1.0.0 as gwas2vcf writes it, so R gwasvcf, pygwasvcf, gwasglue2 and other tools built for OpenGWAS files read it.
+The VCF follows GWAS-VCF 1.0.0 as gwas2vcf writes it, so `gwasvcf`,` pygwasvcf`, `gwasglue2` and other tools built for OpenGWAS files read it.
 
 | Column | Content |
 |---|---|
@@ -212,7 +235,7 @@ The VCF follows GWAS-VCF 1.0.0 as gwas2vcf writes it, so R gwasvcf, pygwasvcf, g
 | `FORMAT/ID` | the rsID, as in the ID column |
 | Sample column | the output ID, for example `GWAScatalog_GCST002783` |
 
-`INFO/HM` describes the alleles relative to what the study reported:
+`INFO/HM` (harmonisation) records, for each variant, what the pipeline did to the alleles the study reported. Harmonisation can exchange the effect and other allele, which reverses the sign of the effect, or move the alleles to the other DNA strand; without a record, a variant whose effect sign differs from the paper's cannot be told apart from an error. HM makes every change traceable, and lets you exclude, for example, the palindromic SNPs whose strand could not be inferred. The name follows the GWAS Catalog harmoniser, whose files carry the same per-variant record as `hm_code`; OpenGWAS files have none. `FORMAT/AFS` does the same for the allele frequency.
 
 | Value | Meaning |
 |---|---|
@@ -229,7 +252,7 @@ Each value takes `_swapped` when the alleles were then swapped. The header decla
 
 Compared with an OpenGWAS file, the output is on GRCh38, fills `FORMAT/AF` from 1000 Genomes and marks it in `FORMAT/AFS`, adds `INFO/SNPID` and `INFO/HM`, carries the trait metadata in `##SAMPLE`, declares the 25 primary contigs only, and types `SS` as Float, as the specification says. R gwasvcf replaces a per-variant `SS` with `TotalCases + TotalControls` when the header has them.
 
-### Reference data
+## Reference data
 
 | Under `GWAS_REFERENCE_ROOT` | Use | Source |
 |---|---|---|
@@ -261,9 +284,19 @@ We read the code of MungeSumstats (Al-Murphy/MungeSumstats, November 2026), gwas
 
 ### GWAS comparison
 
-We processed 2 public GWAS with all 5 pipelines on 12 November 2026 and compared the outputs with the raw study files, and then ran the same Mendelian randomisation (MR) on each pipeline's output. Both GWAS have a raw file, an OpenGWAS GWAS-VCF and a GWAS Catalog harmonised file, so each pipeline could be compared on the same study. Locke et al. 2015 BMI ([Genetic studies of body mass index yield new insights for obesity biology]) gives rsIDs without positions for a continuous trait; O'Mara et al. 2018 endometrial cancer ([Identification of nine new susceptibility loci for endometrial cancer]) gives GRCh37 positions, 1,014,582 indels, 12,906 cases and 108,979 controls. gwas2vcf 1.4.3 was run on the Locke harmonised file against GRCh38 and on the endometrial cancer raw file against GRCh37, and MungeSumstats ran with its defaults and dbSNP 155. The sampled GWASprocessing values are stored in `src/benchmark/expected/`, and `bash src/benchmark.sh` checks a new install against them.
+- 2 public GWAS with all 5 pipelines
+- compared the outputs with the raw study files
+- ran the same Mendelian randomisation (MR) on each pipeline's output
+- both GWAS have a raw file, an OpenGWAS GWAS-VCF, and a GWAS Catalog harmonised file
+  - Locke et al. 2015 BMI ([Genetic studies of body mass index yield new insights for obesity biology]) 
+    - NOTE: rsIDs without positions
+  - O'Mara et al. 2018 endometrial cancer ([Identification of nine new susceptibility loci for endometrial cancer]) 
+    - NOTE: gives GRCh37 positions, 1,014,582 indels, 12,906 cases and 108,979 controls. 
+- `gwas2vcf` (1.4.3) was run on the Locke harmonised file against GRCh38 and on the endometrial cancer raw file against GRCh37
+- `MungeSumstats` ran with its defaults and dbSNP 155
+- The sampled GWASprocessing values are stored in `src/benchmark/expected/`, and `bash src/benchmark.sh` checks a new install against them.
 
-Variants were matched by rsID: the lead SNPs plus 10,000 rsIDs drawn with seed 821. Locke's 8 leads are known BMI loci (FTO, MC4R, TMEM18, GNPDA2, SEC16B, TFAP2B, BDNF, NEGR1); the 16 endometrial cancer leads are the raw file's genome-wide significant SNPs clumped against 1000 Genomes EUR (r² 0.001, 10,000 kb). Each record was aligned to the raw effect allele and compared on alleles, effect sign, effect and SE (within 1e-4), −log10 P (within 0.01) and frequency (within 0.02).
+Variants were matched by rsID: the lead SNPs plus 10,000 rsIDs drawn with seed 821. Locke's 8 leads are known BMI loci (FTO, MC4R, TMEM18, GNPDA2, SEC16B, TFAP2B, BDNF, NEGR1); the 16 endometrial cancer leads are the raw file's genome-wide significant SNPs clumped against 1000 Genomes EUR (r² 0.001, 10,000 kb). Each record was aligned to the raw effect allele and compared on alleles, effect sign, effect, and SE (within 1e-4), −log10 P (within 0.01) and frequency (within 0.02).
 
 | Pipeline | Locke: present of 10,008 | Locke: sign agrees | Locke leads | Endometrial: present of 10,016 | Endometrial: sign agrees | Endometrial leads |
 |---|---|---|---|---|---|---|
@@ -273,9 +306,13 @@ Variants were matched by rsID: the lead SNPs plus 10,000 rsIDs drawn with seed 8
 | GWAS Catalog harmoniser | 9,985 | 100% | 8 of 8 | 9,984 | 100% | 16 of 16 |
 | MungeSumstats | 4,618 | 100% | 7 of 8 | 4,304 | 100% | 4 of 16 |
 
-Every difference is explained. The 3 GWASprocessing sign differences for endometrial cancer are A/T or C/G SNPs on minus-strand chain blocks, where liftover complements the alleles; for these SNPs a complement looks like a swap to a comparison by allele letter, and `INFO/HM` records it. The OpenGWAS files have 27,303 (Locke) and 68,464 (endometrial cancer) fewer rows than the raw files, and the endometrial file lacks the top lead, rs11263761 at HNF1B (P = 3.2e-20). gwas2vcf cannot read 24,229 Locke harmonised rows that have no values, and the harmonised Locke file has no effect for 55 sampled variants. MungeSumstats removes every rsID that dbSNP 155 lists with 3 or more alleles (1,290,677 Locke rows, including the TMEM18 lead; 3,317,703 endometrial cancer rows, including 11 leads) and every variant with INFO below 0.9 (1,966,820 endometrial cancer rows, including 1 lead). No pipeline disagreed with the raw study on the effect, SE or P of a variant it kept.
+- The 3 GWASprocessing sign differences for endometrial cancer are A/T or C/G SNPs on minus-strand chain blocks, where liftover complements the alleles; for these SNPs a complement looks like a swap to a comparison by allele letter, and `INFO/HM` records it. 
+- The OpenGWAS files have 27,303 (Locke) and 68,464 (endometrial cancer) fewer rows than the raw files, and the endometrial file lacks the top lead, rs11263761 at HNF1B (P = 3.2e-20). 
+- `gwas2vcf` cannot read 24,229 Locke harmonised rows that have no values, and the harmonised Locke file has no effect for 55 sampled variants. 
+- `MungeSumstats` removes every rsID that dbSNP 155 lists with 3 or more alleles (1,290,677 Locke rows, including the TMEM18 lead; 3,317,703 endometrial cancer rows, including 11 leads) and every variant with INFO below 0.9 (1,966,820 endometrial cancer rows, including 1 lead). 
+- No pipeline disagreed with the raw study on the effect, SE, or P of a variant it kept
 
-For the MR, Locke BMI was the exposure and endometrial cancer the outcome, each processed by the same pipeline, so differences between the estimates come only from processing. Instruments were exposure variants at P < 5e-8 clumped against 1000 Genomes EUR (r² 0.001, 10,000 kb) and harmonised with TwoSampleMR 0.7.13 under action 2 (palindromes resolved by frequency) and action 3 (palindromes removed).
+For the MR, Locke BMI was the exposure and endometrial cancer the outcome, each processed by the same pipeline, so differences between the estimates come only from processing. Instruments were exposure variants at P < 5e-8 clumped against 1000 Genomes EUR (r² 0.001, 10,000 kb) and harmonised with `TwoSampleMR` (0.7.13) under action 2 (palindromes resolved by frequency) and action 3 (palindromes removed).
 
 | Pipeline | Variants at P < 5e-8 | Instruments | IVW, action 2: b (se), SNPs | IVW, action 3: b (se), SNPs | MR-Egger, action 2 |
 |---|---|---|---|---|---|
@@ -285,6 +322,7 @@ For the MR, Locke BMI was the exposure and endometrial cancer the outcome, each 
 | GWAS Catalog harmoniser | 2,042 | 78 | 0.615 (0.079), 75 | 0.615 (0.079), 75 | 0.591 |
 | MungeSumstats | 915 | 60 | 0.634 (0.085), 59 | 0.639 (0.088), 56 | 0.383 |
 
-GWASprocessing, OpenGWAS, gwas2vcf and the GWAS Catalog select the same 78 instruments, 3 of them palindromic. Only the GWASprocessing exposure carries the study's allele frequency, so only there can TwoSampleMR resolve those 3 under action 2; with palindromes removed, the 4 pipelines agree exactly. MungeSumstats keeps 45% of the genome-wide significant exposure variants and shares 38 of its 60 instruments with the others.
+- `GWASprocessing`, OpenGWAS, `gwas2vcf`, and the GWAS Catalog select the same 78 instruments, 3 of them palindromic. Only the GWASprocessing exposure carries the study's allele frequency, so only there can `TwoSampleMR` resolve those 3 under action 2; with palindromes removed, the 4 pipelines agree exactly. 
+- `MungeSumstats` keeps 45% of the genome-wide significant exposure variants and shares 38 of its 60 instruments with the others.
 
 The scripts used for the comparison are in `src/benchmark/`: `compare.py` (variant comparison), `to_mr_table.py` and `mr.R` (MR), `run_mungesumstats.R` and the gwas2vcf settings (`gwas2vcf_*.json`).

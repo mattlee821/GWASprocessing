@@ -119,6 +119,16 @@ class PrepareManifestTests(unittest.TestCase):
         self.assertIn("row 3", proc.stderr)
         self.assertIn("ancestry", proc.stderr)
 
+    def test_sex_and_format_must_be_known_values(self):
+        header = "GWAS_location\tphenotype\tancestry\tsex\tauthor\tyear\tPMID\tformat\n"
+        manifest = self.manifest(f"{self.raw}\tBMI\tEUR\tFemale\tLocke\t2015\t25673413\tvcf\n"
+                                 f"{self.raw}\tWHR\tEUR\twomen\tPulit\t2018\t30239722\tparquet\n", header)
+        proc = self.prepare(manifest, check=False)
+        self.assertEqual(proc.returncode, 78)
+        self.assertIn("row 3: sex 'women' must be combined, male or female", proc.stderr)
+        self.assertIn("row 3: format 'parquet' must be table or vcf", proc.stderr)
+        self.assertNotIn("row 2", proc.stderr)
+
     def test_two_rows_writing_the_same_outputs_are_rejected(self):
         manifest = self.manifest("ieu-a-2\tBMI\tEUR\tLocke\t2015\t25673413\nieu-a-2\tBMI (copy)\tEUR\tLocke\t2015\t25673413\n")
         proc = self.prepare(manifest, check=False)

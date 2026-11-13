@@ -47,6 +47,8 @@ from gwas_pipeline_common import (
 DERIVED_COLUMNS = ["study_id", "output_id", "row_hash", "raw_dir", "standardise_dir", "output_prefix", "settings_hash"]
 RUN_COLUMNS = MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS + DERIVED_COLUMNS
 SUPPORTED_SOURCES = {"gwas_catalog", "opengwas", "direct_url", "local", "s3", "gs"}
+SEX_VALUES = {"combined", "male", "female"}
+FORMAT_VALUES = {"table", "vcf"}
 
 
 def resolve_local_location(location: str, repo_root: Path, manifest_dir: Path) -> str:
@@ -72,6 +74,12 @@ def validate_row(row: dict[str, str], line: int, source_type: str) -> list[str]:
         errors.append(f"row {line}: no OpenGWAS dataset ID found in {row['GWAS_location']}")
     if source_type == "gwas_catalog" and not re.search(r"GCST\d+", row["GWAS_location"], flags=re.I):
         errors.append(f"row {line}: no GWAS Catalog accession (GCST...) found in {row['GWAS_location']}")
+    sex = str(row.get("sex", "") or "").strip().lower()
+    if sex and sex not in SEX_VALUES:
+        errors.append(f"row {line}: sex '{row.get('sex')}' must be combined, male or female (or empty)")
+    data_format = str(row.get("format", "") or "").strip().lower()
+    if data_format and data_format not in FORMAT_VALUES:
+        errors.append(f"row {line}: format '{row.get('format')}' must be table or vcf (or empty to detect it)")
     return errors
 
 
