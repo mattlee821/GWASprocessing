@@ -32,8 +32,9 @@ import yaml
 # change alters what is written, so completed rows are regenerated on the next run.
 OUTPUT_SCHEMA_VERSION = "3.0.0"
 
-# sysexits.h codes. Nextflow terminates the whole run on EX_CONFIG (an operator must fix configuration)
-# and records the row as failed without retrying on EX_DATAERR (the input itself is unusable).
+# sysexits.h codes. Nextflow terminates the whole run on EX_CONFIG (setup the operator must fix for every row: a
+# token, tools, references) and records the row as failed without retrying on EX_DATAERR (a problem with that row
+# only: its file, build, ancestry or study YAML).
 EXIT_CONFIG = 78
 EXIT_DATA = 65
 
@@ -364,7 +365,7 @@ def resolve_study_config(
         if named:  # a study YAML that is named must exist: silently ignoring it would drop its settings
             path = resolve_config_yaml_path(config_root, named)
             if not path.exists():
-                raise config_error(f"Study YAML {named} for {study_id} not found (looked in {config_root}, its parent and the "
+                raise data_error(f"Study YAML {named} for {study_id} not found (looked in {config_root}, its parent and the "
                                    "working directory)")
             return load_yaml(path)
     candidate = Path(config_root) / f"{study_id}.yaml"

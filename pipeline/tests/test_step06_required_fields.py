@@ -111,7 +111,7 @@ class Step06RequiredFieldsTest(unittest.TestCase):
 
         with self.subTest("missing ancestry fails loudly"):
             missing = run_standardise(tmp, EXAMPLES / "tables/generic.tsv", example_reference(), ancestry="", name="ancestry")
-            self.assertEqual(missing.returncode, 78)
+            self.assertEqual(missing.returncode, 65)
             self.assertIn("ancestry", missing.stderr.lower())
 
 

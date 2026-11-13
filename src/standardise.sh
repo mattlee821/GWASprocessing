@@ -229,8 +229,20 @@ print(f"  Eligible rows: {summary.get('rows_eligible', 0)}")
 print(f"  Deferred by row limit: {summary.get('rows_deferred_due_to_limit', 0)}")
 print(f"  Rows skipped (complete for current settings): {summary.get('rows_skipped_complete', 0)}")
 print(f"  Rows filtered: {summary.get('rows_filtered', 0)}")
+invalid = summary.get("invalid", []) or []
+if invalid:
+    print(f"  Rows failing the manifest checks (not run): {len(invalid)}")
 print(f"  Rows completed: {state.get('updated', 0)}")
 print(f"  State file: {summary.get('state_file', '')}")
+def list_invalid():
+    for r in invalid:
+        print(f"    {r.get('study_id')}/{r.get('output_id')}: " + "; ".join(r.get("errors", [])))
+
+if int(summary.get("rows_to_run", 0) or 0) == 0 and invalid and not dry_run:
+    print(f"  {len(invalid)} row(s) failed:")
+    list_invalid()
+    print("  Fix these rows in the manifest and re-run.")
+    raise SystemExit(1)
 if int(summary.get("rows_to_run", 0) or 0) == 0:
     if int(summary.get("rows_skipped_complete", 0) or 0) > 0:
         print("  Nothing launched: all selected rows already have complete outputs for the current settings.")
@@ -243,11 +255,13 @@ if dry_run:
 done = set(state.get("updated_row_hashes", []))
 run_manifest = log_root / "run_manifest.tsv"
 rows = list(csv.DictReader(open(run_manifest, encoding="utf-8"), delimiter="\t")) if run_manifest.exists() else []
-failed = [r for r in rows if r.get("row_hash") not in done]
-if failed:
-    print(f"  {len(failed)} row(s) failed:")
+rejected = {(r.get("study_id"), r.get("output_id")) for r in invalid}
+failed = [r for r in rows if r.get("row_hash") not in done and (r.get("study_id"), r.get("output_id")) not in rejected]
+if failed or invalid:
+    print(f"  {len(failed) + len(invalid)} row(s) failed:")
     for r in failed:
         print(f"    {r.get('study_id')}/{r.get('output_id')}")
+    list_invalid()
     print("  Details are in the Nextflow log; fix the inputs and re-run (completed rows are skipped).")
     raise SystemExit(1)
 PY

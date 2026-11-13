@@ -80,6 +80,13 @@ class Case:
 
 
 class ManifestTest(unittest.TestCase):
+    def assert_rejected(self, c: Case, proc, run: int) -> None:
+        """The manifest was prepared, `run` rows will run, and the rows failing a check were set aside as failed."""
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(len(c.row_jsons()), run)
+        self.assertGreater(c.summary()["rows_invalid"], 0)
+        self.assertIn("not run (the other rows run)", proc.stderr)
+
     def test_manifest(self):
         base = Path(tempfile.mkdtemp(prefix="gwas_test_manifest_"))
         reference = make_reference(base / "references")
@@ -115,7 +122,7 @@ class ManifestTest(unittest.TestCase):
                        f"{RAW}\tWHR\tEUR\twomen\tPulit\t2018\t30239722\n",
                        "GWAS_location\tphenotype\tancestry\tsex\tauthor\tyear\tPMID\n")
             proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
+            self.assert_rejected(c, proc, run=1)
             self.assertIn("row 3: sex 'women' must be combined, male or female", proc.stderr)
             self.assertNotIn("row 2", proc.stderr)
 
@@ -124,8 +131,26 @@ class ManifestTest(unittest.TestCase):
             c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tvcf\n{RAW}\tWHR\tEUR\tPulit\t2018\t30239722\tparquet\n",
                        HEADER.rstrip("\n") + "\tformat\n")
             proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
+            self.assert_rejected(c, proc, run=1)
             self.assertIn("row 3: format 'parquet' must be table or vcf", proc.stderr)
+            self.assertNotIn("row 2", proc.stderr)
+
+        with self.subTest("input_build must be hg19 or hg38 (GRCh37 and GRCh38 labels accepted), or empty"):
+            c = case()
+            c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tGRCh37\n{RAW}\tWHR\tEUR\tPulit\t2018\t30239722\thg18\n",
+                       HEADER.rstrip("\n") + "\tinput_build\n")
+            proc = c.prepare(check=False)
+            self.assert_rejected(c, proc, run=1)
+            self.assertIn("row 3: input_build 'hg18' must be hg19 (GRCh37) or hg38 (GRCh38)", proc.stderr)
+            self.assertNotIn("row 2", proc.stderr)
+
+        with self.subTest("population must be a 1000 Genomes super-population code, or empty"):
+            c = case()
+            c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\teur\n{RAW}\tWHR\tEUR\tPulit\t2018\t30239722\tCEU\n",
+                       HEADER.rstrip("\n") + "\tpopulation\n")
+            proc = c.prepare(check=False)
+            self.assert_rejected(c, proc, run=1)
+            self.assertIn("row 3: population 'CEU' must be ALL, AFR, AMR, EAS, EUR or SAS", proc.stderr)
             self.assertNotIn("row 2", proc.stderr)
 
         with self.subTest("source_type must be gwas_catalog, opengwas, direct_url or local"):
@@ -135,7 +160,7 @@ class ManifestTest(unittest.TestCase):
             c = case()
             c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tdropbox\n", HEADER.rstrip("\n") + "\tsource_type\n")
             proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
+            self.assert_rejected(c, proc, run=0)
             self.assertIn("unsupported source_type 'dropbox'", proc.stderr)
 
         with self.subTest("a GWAS Catalog or OpenGWAS row must carry its accession or dataset ID"):
@@ -144,7 +169,7 @@ class ManifestTest(unittest.TestCase):
                        "https://example.org/no-dataset\tWHR\tEUR\tPulit\t2018\t30239722\topengwas\n",
                        HEADER.rstrip("\n") + "\tsource_type\n")
             proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
+            self.assert_rejected(c, proc, run=0)
             self.assertIn("row 2: no GWAS Catalog accession", proc.stderr)
             self.assertIn("row 3: no OpenGWAS dataset ID", proc.stderr)
 
@@ -197,15 +222,27 @@ class ManifestTest(unittest.TestCase):
             for raw in ["", "unknown", "asian", "american", "Middle East", "european ancestry"]:
                 self.assertIsNone(common.resolve_ancestry(raw), raw)
 
-        with self.subTest("an invalid ancestry stops the run before any row starts"):
+        with self.subTest("a row that fails a check is listed as failed with its reason, and the other rows run"):
             c = case()
             c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\n{RAW}\tWHR\tunknown\tPulit\t2018\t30239722\n")
             proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
+            self.assert_rejected(c, proc, run=1)
             self.assertIn("row 3", proc.stderr)
             self.assertIn("ancestry", proc.stderr)
+            self.assertEqual([r["study_id"] for r in c.row_jsons()], ["locke_2015_25673413"])
+            invalid = c.summary()["invalid"]
+            self.assertEqual([r["study_id"] for r in invalid], ["pulit_2018_30239722"])
+            self.assertIn("ancestry 'unknown'", invalid[0]["errors"][0])
+            self.assertEqual(sorted(r["study_id"] for r in c.rows()), ["locke_2015_25673413", "pulit_2018_30239722"],
+                             "rejected rows are in the run manifest, so the run lists them as failed")
+
+        with self.subTest("a problem with the manifest as a whole (2 rows writing the same outputs) stops the run before any row starts"):
+            c = case()
+            c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\n{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\n")
+            proc = c.prepare(check=False)
+            self.assertEqual(proc.returncode, 78)
+            self.assertIn("write to the same output directory", proc.stderr)
             self.assertFalse((c.dir / "run.tsv").exists())
-            self.assertEqual(list((c.dir / "rows").glob("*.json")) if (c.dir / "rows").exists() else [], [])
 
         # ---- Sources and IDs ---------------------------------------------------------------------------------------
         with self.subTest("source_type is worked out from GWAS_location"):
@@ -268,13 +305,6 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(Path(row["standardise_dir"]), c.dir / "work" / "locke_2015_25673413" / "standardise" / "GWAScatalog_GCST002783")
             self.assertEqual(row["output_prefix"], str(Path(row["standardise_dir"]) / "standardised"))
 
-        with self.subTest("2 rows writing the same outputs are rejected"):
-            c = case()
-            c.manifest("ieu-a-2\tBMI\tEUR\tLocke\t2015\t25673413\nieu-a-2\tBMI (copy)\tEUR\tLocke\t2015\t25673413\n")
-            proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
-            self.assertIn("same output directory", proc.stderr)
-
         with self.subTest("relative local paths resolve against the manifest directory"):
             c = case()
             (c.config_root / "data").mkdir()
@@ -311,11 +341,11 @@ class ManifestTest(unittest.TestCase):
         with self.subTest("a named study YAML must exist"):
             with self.assertRaises(SystemExit) as caught, contextlib.redirect_stderr(io.StringIO()):
                 common.resolve_study_config(base / "repo" / "manifests", "s", None, "manifests/missing.yaml")
-            self.assertEqual(caught.exception.code, 78)
+            self.assertEqual(caught.exception.code, 65)
             c = case()
             c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tmissing.yaml\n", HEADER.rstrip("\n") + "\tstudy_yaml\n")
             proc = c.prepare(check=False)
-            self.assertEqual(proc.returncode, 78)
+            self.assert_rejected(c, proc, run=0)
             self.assertIn("missing.yaml", proc.stderr)
 
         # ---- Selecting rows ----------------------------------------------------------------------------------------

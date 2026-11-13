@@ -5,7 +5,7 @@ matched on chromosome, position and alleles (either order, either strand) agains
 GRCh38. A build is called when it has at least 20 matches and at least 10 times the other build's matches. Only when
 detection fails is a declared build used: the manifest or YAML input_build, then the source metadata, then the VCF
 header. A declared build that disagrees with the detected one is reported and not used; with neither, the row stops
-(exit 78). Files with rsIDs and no positions need no build.
+(exit 65: that row fails, the other rows run). Files with rsIDs and no positions need no build.
 
 The fixture places 30 common SNPs at GRCh37 10,000 + 1,000 i and GRCh38 = GRCh37 + 100 (testlib's offset chains).
 """
@@ -90,7 +90,7 @@ class Step04BuildTest(unittest.TestCase):
             self.assertEqual(enough.returncode, 0, enough.stderr)
             self.assertEqual((enough.qc["build_detection"]["build"], enough.qc["build_detection"]["method"]), ("hg38", "detected"))
             too_few = self.run_table("hits_19", GRCH38[:19] + NO_MATCH[:5])
-            self.assertEqual(too_few.returncode, 78)
+            self.assertEqual(too_few.returncode, 65)
             self.assertIn("input_build", too_few.stderr)
 
         with self.subTest("A build is called with at least 10 times the other build's matches"):
@@ -135,13 +135,13 @@ class Step04BuildTest(unittest.TestCase):
             self.assertTrue(any("disagrees" in w for w in result.qc["warnings"]), result.qc["warnings"])
             self.assertEqual(sorted(r["POS"] for r in result.rows), GRCH38)  # not lifted as GRCh37
 
-        with self.subTest("With neither a detected nor a declared build the row stops with exit 78"):
+        with self.subTest("With neither a detected nor a declared build the row fails on its own (exit 65)"):
             table = self.run_table("undeterminable", NO_MATCH)
-            self.assertEqual(table.returncode, 78)
+            self.assertEqual(table.returncode, 65)
             self.assertIn("input_build", table.stderr)
             vcf = write_vcf(self.tmp / "nobuild.gwas.vcf", [(123_457, "rsX")], contig="")
             gwas_vcf = run_standardise(self.tmp, vcf, self.reference, name="undeterminable_vcf")
-            self.assertEqual(gwas_vcf.returncode, 78)
+            self.assertEqual(gwas_vcf.returncode, 65)
             self.assertIn("input_build", gwas_vcf.stderr)
 
         with self.subTest("Files with rsIDs and no positions need no build"):

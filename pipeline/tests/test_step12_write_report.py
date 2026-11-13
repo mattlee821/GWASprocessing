@@ -297,6 +297,7 @@ class WriteAndReportStepTest(unittest.TestCase):
             between = {"qc_metrics": {"mean_effect": 0.2}, "lambda_gc": 1.2}
             self.assertEqual(set(qc_flags(between, {"TotalControls": 20000})), {"mean_EFFECT_01"})
             self.assertIn("n", qc_flags({"qc_metrics": {}}, {"TotalControls": 4000, "TotalCases": 1000}))
+            self.assertIn("af_correlation", qc_flags({"af_concordance": {"pearson_r": -0.8}, "qc_metrics": {}}, {}))
 
         with self.subTest("genomic inflation and provenance are recorded"):
             self.assertAlmostEqual(small.qc["lambda_gc"], 8.44394650653, places=5)

@@ -241,6 +241,28 @@ class RunTest(unittest.TestCase):
             self.assertNotIn("s1/ok", proc.stdout)
             self.assertTrue((w.repo / "GWAS" / "manifest.html").exists(), "manifest.html is updated at the end of every run")
 
+        with self.subTest("rows failing the manifest checks are listed as failed with their reasons"):
+            w = wrapper()
+            summaries = w.tmp / "summaries"
+            summaries.mkdir()
+            invalid = [{"study_id": "s3", "output_id": "bad", "errors": ["row 4: sex 'women' must be combined, male or female"]}]
+            (summaries / "run_manifest_summary.json").write_text(json.dumps({"rows_to_run": 1, "rows_eligible": 1, "rows_invalid": 1,
+                                                                              "invalid": invalid}), encoding="utf-8")
+            (summaries / "run_manifest.tsv").write_text("study_id\toutput_id\trow_hash\ns1\tok\th1\ns3\tbad\t\n", encoding="utf-8")
+            (summaries / "state_update_summary.json").write_text(json.dumps({"updated": 1, "updated_row_hashes": ["h1"]}),
+                                                                  encoding="utf-8")
+            proc = w.run(env=w.env(STUB_SUMMARY_DIR=str(summaries)))
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("1 row(s) failed", proc.stdout)
+            self.assertIn("s3/bad: row 4: sex 'women' must be combined, male or female", proc.stdout)
+            self.assertNotIn("s1/ok", proc.stdout)
+            # with every row rejected, nothing runs and the exit status is still non-zero
+            (summaries / "run_manifest_summary.json").write_text(json.dumps({"rows_to_run": 0, "rows_invalid": 1, "invalid": invalid}),
+                                                                 encoding="utf-8")
+            proc = w.run(env=w.env(STUB_SUMMARY_DIR=str(summaries)))
+            self.assertEqual(proc.returncode, 1)
+            self.assertIn("s3/bad: row 4", proc.stdout)
+
         with self.subTest("summaries from an earlier run are not reported"):
             w = wrapper()
             logs = w.repo / "temp" / "logs"

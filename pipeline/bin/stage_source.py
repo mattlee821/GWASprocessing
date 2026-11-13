@@ -13,12 +13,12 @@ import argparse
 import shutil
 from pathlib import Path
 
-from download_gwas_catalog import download_gwas_catalog
+from download_gwas_catalog import download_gwas_catalog, verify_gzip
 from download_opengwas import download_opengwas
 from gwas_pipeline_common import (
     MANIFEST_COLUMNS,
     MANIFEST_OPTIONAL_COLUMNS,
-    config_error,
+    data_error,
     download_url,
     ensure_dir,
     guess_filename_from_url,
@@ -42,6 +42,22 @@ def copy_local(location: str, raw_dir: Path) -> Path:
         shutil.copy2(src, tmp)
         tmp.replace(dest)
     return dest
+
+
+def checked_download(fetch, metadata: dict) -> Path:
+    """Download with fetch(), then check a .gz file's gzip integrity: a file that fails (including one left by an
+    earlier interrupted run) is deleted and downloaded once more, and a second failure stops the row."""
+    path = fetch()
+    result = verify_gzip(path)
+    if result.get("checked") and not result.get("ok"):
+        path.unlink(missing_ok=True)
+        path = fetch()
+        result = verify_gzip(path)
+        if result.get("checked") and not result.get("ok"):
+            path.unlink(missing_ok=True)
+            raise ValueError(f"gzip integrity check failed for {path}: {result.get('error', '')}")
+    metadata["gzip"] = result
+    return path
 
 
 def main() -> None:
@@ -70,14 +86,19 @@ def main() -> None:
         metadata.update(download_gwas_catalog(location, raw_dir, row.get("PMID", ""), "harmonised" if prefer == "harmonised" else "raw"))
         raw_path = Path(metadata["raw_path"])
     elif source_type == "opengwas":
-        metadata.update(download_opengwas(location, raw_dir))
-        raw_path = Path(metadata["raw_path"])
+        info: dict = {}
+
+        def fetch_opengwas() -> Path:
+            info.update(download_opengwas(location, raw_dir))
+            return Path(info["raw_path"])
+        raw_path = checked_download(fetch_opengwas, metadata)
+        metadata.update(info)
     elif source_type == "direct_url":
-        raw_path = download_url(location, raw_dir)
+        raw_path = checked_download(lambda: download_url(location, raw_dir), metadata)
     elif source_type == "local":
         raw_path = copy_local(location, raw_dir)
     else:
-        raise config_error(f"Unsupported source_type '{source_type}' for {location}")
+        raise data_error(f"Unsupported source_type '{source_type}' for {location}")
 
     record = {col: row.get(col, "") for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}
     record.update({

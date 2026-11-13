@@ -216,7 +216,7 @@ class Step01StageTest(unittest.TestCase):
         with self.subTest("Raw file whose build cannot be detected: the harmonised file is used and the fallback recorded"):
             self.assertEqual(build.returncode, 0, build.stderr)
             self.assertEqual((build.qc["gwas_catalog_fallback"]["harmonised_file"], build.qc["gwas_catalog_fallback"]["exit_code"]),
-                             ("x.h.tsv", 78))
+                             ("x.h.tsv", 65))
             self.assertEqual(build.qc["build_detection"]["build"], "hg38")
             self.assertEqual(len(build.rows), 25)
 
@@ -270,6 +270,29 @@ class Step01StageTest(unittest.TestCase):
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(Path(record["raw_path"]).read_bytes(), (EXAMPLES / "tables/generic.tsv").read_bytes())
 
+        with self.subTest("URL downloads are checked by gzip integrity"):
+            served = self.tmp / "served_gz"
+            served.mkdir()
+            good = gzip.compress(b"SNP\tP\n" * 1000)
+            (served / "good.tsv.gz").write_bytes(good)
+            (served / "bad.tsv.gz").write_bytes(good[:-20])  # truncated gzip stream, complete HTTP transfer
+            with LocalHttpServer(served) as server:
+                proc, record = self.stage(self.row(f"{server.url}/good.tsv.gz", "direct_url", name="url_gz"))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(record["metadata"]["gzip"], {"checked": True, "ok": True})
+                proc, record = self.stage(self.row(f"{server.url}/bad.tsv.gz", "direct_url", name="url_bad_gz"))
+                self.assertNotEqual(proc.returncode, 0)
+                self.assertIn("gzip integrity check failed", proc.stderr)
+                self.assertFalse((self.tmp / "url_bad_gz" / "raw" / "bad.tsv.gz").exists())
+
+                # a damaged file left by an earlier run is downloaded again
+                leftover = self.tmp / "url_leftover" / "raw" / "good.tsv.gz"
+                leftover.parent.mkdir(parents=True)
+                leftover.write_bytes(good[:-20])
+                proc, record = self.stage(self.row(f"{server.url}/good.tsv.gz", "direct_url", name="url_leftover"))
+                self.assertEqual(proc.returncode, 0, proc.stderr)
+                self.assertEqual(leftover.read_bytes(), good)
+
         with self.subTest("URLs are downloaded with retries"):
             with ScriptedServer({"/f.tsv": [(500, b"busy", {}), (200, b"SNP\tP\n", {})]}) as server:
                 path = common.download_url(f"{server.url}/f.tsv", self.tmp / "retry", retries=2, backoff=0)
@@ -313,9 +336,9 @@ class Step01StageTest(unittest.TestCase):
             self.assertNotEqual(proc.returncode, 0)
             self.assertIn("not found", proc.stderr)
 
-        with self.subTest("An unsupported source type is a configuration error (exit 78)"):
+        with self.subTest("An unsupported source type fails that row (exit 65)"):
             proc, _ = self.stage(self.row(self.tmp / "gwas.tsv", "unsupported", name="unsupported"))
-            self.assertEqual(proc.returncode, 78, proc.stderr)
+            self.assertEqual(proc.returncode, 65, proc.stderr)
 
         # --- Stage record -------------------------------------------------------------------------------------
         with self.subTest("The stage record carries the manifest fields and the settings hash"):

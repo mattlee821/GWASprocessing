@@ -28,10 +28,12 @@ MANIFEST="${ROOT_DIR}/manifests/test.tsv"
 EXPECTED="${ROOT_DIR}/src/benchmark/expected"
 
 run_manifest="${MANIFEST}"
+run_log="$(mktemp "${TMPDIR:-/tmp}/gwasprocessing_benchmark_log.XXXXXX")"
+trap 'rm -f "${run_log}"' EXIT
 skipped_opengwas=0
 if [[ -z "${OPENGWAS_JWT:-}" ]]; then
   run_manifest="$(mktemp "${TMPDIR:-/tmp}/gwasprocessing_benchmark.XXXXXX")"
-  trap 'rm -f "${run_manifest}"' EXIT
+  trap 'rm -f "${run_manifest}" "${run_log}"' EXIT
   grep -v "opengwas.io" "${MANIFEST}" > "${run_manifest}"
   skipped_opengwas=1
   echo "OPENGWAS_JWT is not set in .env: the 2 OpenGWAS rows are skipped (add a token to include them)."
@@ -40,12 +42,21 @@ fi
 echo "Standardising the benchmark GWAS (the first run downloads about 630 MB and takes about 50 minutes with 3 workers)"
 run_status=0
 bash "${ROOT_DIR}/src/standardise.sh" --manifest "${run_manifest}" --row-limit 0 --report false ${FORCE[@]+"${FORCE[@]}"} \
-  || run_status=$?
+  2>&1 | tee "${run_log}" || run_status=$?
+
+# A row this run listed as failed fails its check, even when an earlier run left an output in its folder.
+row_failed() {  # row_failed OUTPUT_FOLDER (study/standardise/output_id)
+  local key="    ${1%%/*}/${1##*/}"
+  grep -qxF "${key}" "${run_log}" || grep -qF "${key}: " "${run_log}"
+}
 
 results=()
 failed=0
 check() {  # check NAME EXPECTED_FILE OUTPUT_FOLDER
   local vcf="${WORK_ROOT}/$3/standardised.gwas.vcf.gz" line
+  if row_failed "$3"; then
+    results+=("FAIL  $1: the row failed in this run (see above)"); failed=1; return
+  fi
   if [[ ! -s "${vcf}" ]]; then
     results+=("FAIL  $1: no output (${vcf})"); failed=1; return
   fi
@@ -57,7 +68,9 @@ check() {  # check NAME EXPECTED_FILE OUTPUT_FOLDER
   fi
 }
 exists() {  # exists NAME OUTPUT_FOLDER
-  if [[ -s "${WORK_ROOT}/$2/standardised.gwas.vcf.gz" ]]; then
+  if row_failed "$2"; then
+    results+=("FAIL  $1: the row failed in this run (see above)"); failed=1
+  elif [[ -s "${WORK_ROOT}/$2/standardised.gwas.vcf.gz" ]]; then
     results+=("PASS  $1: completed")
   else
     results+=("FAIL  $1: no output"); failed=1

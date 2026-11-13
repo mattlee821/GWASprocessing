@@ -130,6 +130,7 @@ class DuplicatesStepTest(unittest.TestCase):
             [1, 1300, "rsC1", "A", "G", 0.3, 0.13, 0.02, 1e-6, 5000],
             [1, 1300, "rsC2", "T", "G", 0.3, 0.14, 0.02, 1e-6, 5000],         # same position, another allele pair
             [1, 3005, "del_right", "A", "ACA", 0.3, 0.15, 0.02, 1e-6, 5000],  # CA deletion written at the right
+            [1, 3001, "ins", "GCA", "G", 0.3, 0.18, 0.02, 1e-6, 5000],        # CA insertion at the same anchor
             [1, 1400, "rsD", "A", "G", 0.3, 0.16, 0.02, 1e-6, 5000],
             [1, 1500, "rsA", "A", "G", 0.3, 0.17, 0.02, 1e-6, 5000],          # the same study ID at another position
             [1, 1100, "rsA_again", "A", "G", 0.3, 0.91, 0.02, 1e-6, 5000],    # repeat under another ID
@@ -161,6 +162,10 @@ class DuplicatesStepTest(unittest.TestCase):
         with self.subTest("the same indel written 2 ways is recognised after left-alignment"):
             self.assertEqual(kept[(3001, "GCA", "G")], ("del_right", "0.15"))
             self.assertEqual([k for k in kept if k[0] in (3003, 3005)], [])
+
+        with self.subTest("an insertion and a deletion at the same position are different variants"):
+            self.assertEqual(kept[(3001, "G", "GCA")], ("ins", "0.18"))
+            self.assertEqual(kept[(3001, "GCA", "G")], ("del_right", "0.15"))
 
         with self.subTest("the first in input order is kept"):
             self.assertFalse({"0.91", "-0.92", "0.92", "0.93", "0.94"} & {es for _, es in kept.values()})

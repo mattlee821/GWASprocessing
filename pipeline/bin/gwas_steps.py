@@ -133,9 +133,6 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                   "ambiguous: no allele-matched 1000 Genomes frequency": _n(pal.get("ambiguous_no_reference")),
                   "ambiguous: no study-reported frequency": _n(pal.get("ambiguous_no_study_eaf"))},
                  [f"palindromic SNPs: {_n(pal.get('palindromic_total')):,}"])
-    rows = _step(steps, rows, "Duplicates",
-                 "Records with the same GRCh38 chromosome, position and allele pair; the first in input order is kept, except that a record under a current rsID is kept over one under an rsID dbSNP has merged into it.",
-                 {"duplicate of an earlier record": _n(qc.get("duplicates_removed"))})
     alignment = qc.get("reference_alignment", {}) or {}
     if alignment.get("performed"):
         rows = _step(steps, rows, "GRCh38 reference alignment",
@@ -147,6 +144,9 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
                       "complemented to the forward strand": _n(alignment.get("strand_flipped")),
                       "indels left-aligned and trimmed": _n(qc.get("indels_left_aligned")),
                       "kept, reference base unavailable": _n(alignment.get("unalignable_kept"))})
+    rows = _step(steps, rows, "Duplicates",
+                 "Records with the same GRCh38 chromosome, position and allele pair; the first in input order is kept, except that a record under a current rsID is kept over one under an rsID dbSNP has merged into it.",
+                 {"duplicate of an earlier record": _n(qc.get("duplicates_removed"))})
     output = _n(qc.get("output_rows"))
     if rows is not None and rows != output:
         steps[-1]["notes"].append(f"UNRECONCILED: the steps leave {rows:,} rows but {output:,} were written")

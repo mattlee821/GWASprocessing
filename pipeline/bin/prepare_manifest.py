@@ -25,8 +25,10 @@ from gwas_pipeline_common import (
     EXIT_CONFIG,
     MANIFEST_COLUMNS,
     MANIFEST_OPTIONAL_COLUMNS,
+    SUPER_POPULATIONS,
     atomic_write_text,
     infer_source_type,
+    normalize_build_value,
     normalize_source_type,
     opengwas_dataset_id,
     output_id_from_row,
@@ -75,6 +77,12 @@ def validate_row(row: dict[str, str], line: int, source_type: str) -> list[str]:
     sex = str(row.get("sex", "") or "").strip().lower()
     if sex and sex not in SEX_VALUES:
         errors.append(f"row {line}: sex '{row.get('sex')}' must be combined, male or female (or empty)")
+    build = str(row.get("input_build", "") or "").strip()
+    if build and not normalize_build_value(build):
+        errors.append(f"row {line}: input_build '{build}' must be hg19 (GRCh37) or hg38 (GRCh38) (or empty)")
+    population = str(row.get("population", "") or "").strip()
+    if population and population.upper() not in SUPER_POPULATIONS:
+        errors.append(f"row {line}: population '{population}' must be ALL, AFR, AMR, EAS, EUR or SAS (or empty)")
     data_format = str(row.get("format", "") or "").strip().lower()
     if data_format and data_format not in FORMAT_VALUES:
         errors.append(f"row {line}: format '{row.get('format')}' must be table or vcf (or empty to detect it)")
@@ -106,7 +114,8 @@ def main() -> None:
     reference_root = Path(args.reference_root) if args.reference_root else repo_root / "references"
     state = read_state(args.state_file)
 
-    errors: list[str] = []
+    errors: list[str] = []  # problems with the manifest as a whole: they stop the run before any row starts
+    invalid: list[dict[str, Any]] = []  # rows that fail a check: listed as failed while the other rows run
     seen_outputs: dict[str, int] = {}
     eligible: list[dict[str, Any]] = []
     skipped = filtered = 0
@@ -117,7 +126,7 @@ def main() -> None:
             filtered += 1
             continue
         source_type = normalize_source_type(row["source_type"]) if row.get("source_type") else infer_source_type(row["GWAS_location"])
-        errors.extend(validate_row(row, line, source_type))
+        row_errors = validate_row(row, line, source_type)
         original_location = row["GWAS_location"]
         if source_type == "local":
             row["GWAS_location"] = resolve_local_location(original_location, repo_root, manifest.parent)
@@ -136,9 +145,15 @@ def main() -> None:
             "raw_dir": str(work_root / study_id / "raw" / output_id), "standardise_dir": str(standardise_dir),
             "output_prefix": str(output_prefix),
         })
-        if errors:
+        config = None
+        if not row_errors:
+            try:
+                config = resolve_row_config(config_root, out_row, args.study_yaml)
+            except SystemExit:
+                row_errors.append(f"row {line}: study YAML '{out_row.get('study_yaml') or args.study_yaml}' not found")
+        if row_errors:
+            invalid.append({**out_row, "errors": row_errors})
             continue
-        config = resolve_row_config(config_root, out_row, args.study_yaml)
         out_row["settings_hash"] = settings_fingerprint(out_row, config, reference_root)
         expected = {
             "standard_vcf": str(output_prefix.with_suffix(".gwas.vcf.gz")),
@@ -155,8 +170,11 @@ def main() -> None:
         eligible.append(out_row)
 
     if errors:
-        print("Manifest validation failed:\n  " + "\n  ".join(errors), file=sys.stderr)
+        print("Manifest validation failed:\n  " + "\n  ".join(errors + [e for r in invalid for e in r["errors"]]), file=sys.stderr)
         raise SystemExit(EXIT_CONFIG)
+    if invalid:
+        print("These rows fail the manifest checks and are not run (the other rows run):\n  "
+              + "\n  ".join(e for r in invalid for e in r["errors"]), file=sys.stderr)
 
     row_limit = max(args.row_limit, 0)
     to_run = eligible[:row_limit] if row_limit else eligible
@@ -172,12 +190,14 @@ def main() -> None:
     writer = csv.DictWriter(buffer, fieldnames=RUN_COLUMNS, delimiter="\t", lineterminator="\n", extrasaction="ignore")
     writer.writeheader()
     writer.writerows(to_run)
+    writer.writerows(invalid)  # listed so the run reports them as failed and manifest.html keeps them
     atomic_write_text(args.output, buffer.getvalue())
     write_json(args.summary, {
         "manifest": str(manifest.resolve()), "state_file": str(Path(args.state_file).resolve()),
         "rows_to_run": len(to_run), "rows_eligible": len(eligible), "rows_deferred_due_to_limit": len(eligible) - len(to_run),
         "rows_skipped_complete": skipped, "rows_filtered": filtered, "force": force, "report": report,
-        "row_limit": row_limit,
+        "row_limit": row_limit, "rows_invalid": len(invalid),
+        "invalid": [{"study_id": r["study_id"], "output_id": r["output_id"], "errors": r["errors"]} for r in invalid],
     })
 
 

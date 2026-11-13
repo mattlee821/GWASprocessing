@@ -103,8 +103,8 @@ https://opengwas.io/datasets/ebi-a-GCST006464	endometrial cancer	EUR	female	OMar
 | `sex` | no | `combined`, `male` or `female` | the sex of the GWAS sample, written to the VCF header (`NA` when empty) |
 | `author`, `year`, `PMID` | yes | first author's surname, publication year, PubMed ID | written to the VCF header, and together name the study folder (`locke_2015_25673413`) |
 | `source_type` | no | `gwas_catalog`, `opengwas`, `direct_url`, `local` | how the file is fetched. It is worked out from `GWAS_location`; set it only when that goes wrong, for example a local file whose name looks like an OpenGWAS ID |
-| `input_build` | no | `hg19` (GRCh37) or `hg38` (GRCh38) | the genome build of the file's positions. The build is detected from the data; this value is used only when detection fails, and a value that contradicts the data is reported and ignored |
-| `population` | no | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL` | the 1000 Genomes population whose allele frequencies are compared with the study's, to resolve the strand of palindromic SNPs, fill missing frequencies and check the effect allele. It defaults to `ancestry`; set it when the file's frequency column comes from another population. Locke is an all-ancestry meta-analysis (`ancestry` `ALL`) whose frequencies come from HapMap CEU, so its `population` is `EUR` |
+| `input_build` | no | `hg19` (GRCh37) or `hg38` (GRCh38); labels such as `GRCh37` are accepted, and any other value fails that row | the genome build of the file's positions. The build is detected from the data; this value is used only when detection fails, and a value that contradicts the data is reported and ignored |
+| `population` | no | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL`; any other value fails that row | the 1000 Genomes population whose allele frequencies are compared with the study's, to resolve the strand of palindromic SNPs, fill missing frequencies and check the effect allele. It defaults to `ancestry`; set it when the file's frequency column comes from another population. Locke is an all-ancestry meta-analysis (`ancestry` `ALL`) whose frequencies come from HapMap CEU, so its `population` is `EUR` |
 | `delimiter` | no | `tab`, `comma`, `space` (any run of spaces or tabs), or the character itself | the column separator of a table. It is detected from the header when empty; leave it empty for a VCF |
 | `format` | no | `table` or `vcf` | whether the file is a table of summary statistics or a GWAS-VCF (OpenGWAS files are GWAS-VCFs). It is detected from the file when empty |
 | `study_yaml` | no | a path, relative to the repository or to `manifests/` | a study YAML with settings for this GWAS (step 2); empty when the file needs none |
@@ -137,7 +137,7 @@ standardised.report.html       self-contained report: steps, flags, QQ plots
 
 #### 5. Rerun when something changes
 
-A completed row is skipped while its outputs exist and its settings are unchanged (manifest row, study YAML, reference files, pipeline output version); a change reruns it. A row whose file is unusable fails without stopping the others, and the run lists failed rows at the end. To make a report for 1 GWAS processed with `--report false`: `python3 pipeline/bin/report.py --dir <GWAS folder>`.
+A completed row is skipped while its outputs exist and its settings are unchanged (manifest row, study YAML, reference files, pipeline output version); a change reruns it. A problem with 1 row fails only that row, and the run lists failed rows, with the reason, at the end: a manifest value that fails a check (ancestry, sex, build, population, format, source, a missing study YAML) sets the row aside before it starts, and an unusable file or a build that cannot be detected fails it during processing. Only a problem with the setup or the manifest as a whole stops the run: a missing or expired OpenGWAS token, missing tools or references, a missing manifest column, or 2 rows writing to the same folder. To make a report for 1 GWAS processed with `--report false`: `python3 pipeline/bin/report.py --dir <GWAS folder>`.
 
 #### 6. Read a VCF in R
 
@@ -168,7 +168,7 @@ df <- data.frame(CHR = as.character(stats$seqnames), POS = stats$start, SNP = st
 
 ### 1. Stage
 
-GWAS Catalog sources are downloaded as the raw author-submitted file, and the URL of the Catalog's harmonised file is recorded. When the raw file cannot be standardised (columns that cannot be mapped, a build that cannot be detected), the harmonised file is used instead and the fallback is recorded; `gwas_catalog_file: harmonised` in a study YAML chooses it from the start. The raw file is preferred because the harmonised file is a processed copy: it removes every variant without an rsID, orients palindromic SNPs by 1 file-wide strand assumption, converts −log10 P to P (which underflows) and keeps duplicates. OpenGWAS sources use the authenticated API, and their GWAS-VCF goes through the same steps as any table, so it is re-harmonised to GRCh38. URLs are downloaded with retries, and local files are copied and copied again when they change. Downloads are checked by checksum or gzip integrity.
+GWAS Catalog sources are downloaded as the raw author-submitted file, and the URL of the Catalog's harmonised file is recorded. When the raw file cannot be standardised (columns that cannot be mapped, a build that cannot be detected), the harmonised file is used instead and the fallback is recorded; `gwas_catalog_file: harmonised` in a study YAML chooses it from the start. The raw file is preferred because the harmonised file is a processed copy: it removes every variant without an rsID, orients palindromic SNPs by 1 file-wide strand assumption, converts −log10 P to P (which underflows) and keeps duplicates. OpenGWAS sources use the authenticated API, and their GWAS-VCF goes through the same steps as any table, so it is re-harmonised to GRCh38. URLs are downloaded with retries, and local files are copied and copied again when they change. GWAS Catalog downloads are checked against the Catalog's md5 checksum, or by gzip integrity where there is none; URL and OpenGWAS downloads are checked by gzip integrity when compressed. A file that fails, including one left damaged by an earlier run, is downloaded once more, and a second failure stops the row.
 
 ### 2. Read
 
@@ -190,11 +190,11 @@ GRCh37 positions are lifted with BCFtools/liftover ([BCFtools/liftover: an accur
 
 ### 6. Required fields
 
-Rows without a GRCh38 position, 2 different alleles made of A, C, G and T, an effect, a positive SE or a P value are removed, each counted against the first cause that applies. Nothing else is filtered: frequency, imputation quality, chromosome and biallelic filters are analysis choices left to the user.
+Rows without a GRCh38 position, 2 different alleles made of A, C, G and T, an effect, a positive SE or a valid P value are removed, each counted against the first cause that applies. A missing P is first recovered from BETA and SE (step 3), so only a P outside 0 to 1, or a missing P with no SE, removes a row. Nothing else is filtered: frequency, imputation quality, chromosome and biallelic filters are analysis choices left to the user.
 
 ### 7. 1000 Genomes annotation
 
-Each variant is matched on GRCh38 position and alleles (either strand) to the frequencies of the manifest population, from the 2,504 unrelated phase 3 samples of the 1000 Genomes 30x GRCh38 release. Where the study reports no frequency, `FORMAT/AF` is filled from 1000 Genomes and `FORMAT/AFS` names the source. The frequency check correlates the study frequencies of non-palindromic SNPs with 1000 Genomes: a negative correlation over at least 1,000 SNPs means the effect-allele column is mislabelled (as when a SAIGE file reports `Allele2` as the effect allele) and stops the row; a weak correlation is a warning.
+Each variant is matched on GRCh38 position and alleles (either strand) to the frequencies of the manifest population, from the 2,504 unrelated phase 3 samples of the 1000 Genomes 30x GRCh38 release. Where the study reports no frequency, `FORMAT/AF` is filled from 1000 Genomes and `FORMAT/AFS` names the source. The frequency check correlates the study frequencies of non-palindromic SNPs with 1000 Genomes: a negative correlation over at least 1,000 SNPs means the effect-allele column is mislabelled (as when a SAIGE file reports `Allele2` as the effect allele) and stops the row; a correlation below 0.5 over at least 100 SNPs is a warning. If the frequencies of the chosen population are missing from the references, those of ALL are used and a warning says so.
 
 ### 8. Palindromic SNPs
 
@@ -202,11 +202,11 @@ A/T and C/G SNPs follow the TwoSampleMR `harmonise_data` frequency approach (its
 
 ### 9. Reference alignment
 
-`REF` is the GRCh38 reference base and `ALT` the other allele. When the effect allele is the reference base, the alleles are swapped, `ES` and `EZ` negated and `AF` becomes 1 − AF. A non-palindromic SNP reported on the reverse strand is complemented. A SNV matching neither strand is removed. Indels are checked against the reference, left-aligned and trimmed, so the same indel written 2 ways is recognised in step 10.
+`REF` is the GRCh38 reference base and `ALT` the other allele. When the effect allele is the reference base, the alleles are swapped, `ES` and `EZ` negated and `AF` becomes 1 − AF. A non-palindromic SNP reported on the reverse strand is complemented. A SNV matching neither strand is removed. Indels are checked against the reference, left-aligned and trimmed, so the same indel written 2 ways is recognised in step 10. Where the reference has no sequence at the position, or an `N`, the variant is kept as reported and marked `unverified`.
 
 ### 10. Duplicates
 
-Records with the same GRCh38 position and allele pair are duplicates. The first in input order is kept, except that a record under a current rsID is kept over one under a retired rsID.
+Records with the same GRCh38 position, `REF` and `ALT` are duplicates; as alignment has already put the alleles in `REF`/`ALT` order, the same variant reported either way round matches, while an insertion and a deletion at the same position (G>GCA, GCA>G) stay separate. Variants that could not be aligned are matched on the unordered allele pair. The first in input order is kept, except that a record under a current rsID is kept over one under a retired rsID.
 
 ### 11. rsIDs
 
@@ -214,7 +214,7 @@ The ID column is the dbSNP build 157 rsID matched on GRCh38 position and both al
 
 ### 12. Write and report
 
-Records are sorted, compressed with bgzip and indexed with tabix. The step log in `standardised.qc.json`, also printed to the run log, gives every step's rows in, rows removed by reason and changes made, and the counts reconcile from input rows to written rows. The QC flags follow the OpenGWAS report thresholds and never stop a row: frequency correlation with 1000 Genomes below 0.7, lambda GC above 1.2, maximum sample size below 10,000, mean effect above 0.5 or 0.1 in absolute value, and more than 1,000 variants at P < 5e-8. The HTML report holds the step table, flags, header counts, raw and standardised QQ plots, warnings and timings in 1 self-contained file. `manifest.html` in the work root summarises every GWAS of the install, and keeps failed rows listed until they complete.
+Records are sorted, compressed with bgzip and indexed with tabix. The step log in `standardised.qc.json`, also printed to the run log, gives every step's rows in, rows removed by reason and changes made, and the counts reconcile from input rows to written rows. The QC flags follow the OpenGWAS report thresholds and never stop a row: frequency correlation with 1000 Genomes below 0.7 (a negative correlation included: OpenGWAS uses the absolute value, but after alignment a negative correlation means mislabelled alleles), lambda GC above 1.2, maximum sample size below 10,000, mean effect above 0.5 or 0.1 in absolute value, and more than 1,000 variants at P < 5e-8. The HTML report holds the step table, flags, header counts, raw and standardised QQ plots, warnings and timings in 1 self-contained file. `manifest.html` in the work root summarises every GWAS of the install, and keeps failed rows listed until they complete.
 
 ## Output columns
 
@@ -245,7 +245,7 @@ The VCF follows GWAS-VCF 1.0.0 as gwas2vcf writes it, so `gwasvcf`,` pygwasvcf`,
 | `swapped` | the effect allele was the reference base: alleles exchanged, ES negated, AF to 1 − AF |
 | `complemented` | alleles now on the other strand from the study's, because the study reported the reverse strand or liftover crossed a minus-strand block (2 complements cancel) |
 | `complemented_swapped` | both |
-| `unverified` | no reference sequence at the position |
+| `unverified` | no reference sequence at the position, or an `N` in it |
 | `palindrome_forward`, `palindrome_complemented` | A/T or C/G SNP whose strand was inferred from frequency |
 | `palindrome_ambiguous` | A/T or C/G SNP kept as reported, strand not inferable |
 | `palindrome_ambiguous_complemented` | as above, but liftover complemented the alleles |

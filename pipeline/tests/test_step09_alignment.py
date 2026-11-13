@@ -52,7 +52,7 @@ class ReferenceAlignmentStepTest(unittest.TestCase):
 
         # Chromosome 1 of the GRCh38 FASTA (3,000 bases); chromosome 2 is absent from it.
         genome = sequence(3000, {100: "G", 200: "G", 300: "G", 400: "G", 500: "G", 1001: "GCACACATT", 2001: "GCACACATT",
-                                 2501: "TAG", 2700: "CCC"})
+                                 2501: "TAG", 2700: "CCC", 600: "N", 700: "GNN"})
         reference = make_reference(tmp / "reference", lookup_rows=[], fasta={"1": genome})
         rows = [
             [1, 100, "keep", "A", "G", 0.3, 0.1, 0.02, 1e-6, 5000],     # OA is the GRCh38 base
@@ -65,6 +65,8 @@ class ReferenceAlignmentStepTest(unittest.TestCase):
             [1, 2502, "indelswap", "A", "AT", 0.3, 0.8, 0.02, 1e-6, 5000],  # EA is the GRCh38 sequence
             [1, 2700, "indelbad", "A", "GTT", 0.3, 0.9, 0.02, 1e-6, 5000],  # neither indel allele matches the sequence
             [1, 5000, "beyond", "A", "G", 0.3, 1.0, 0.02, 1e-6, 5000],  # past the end of the FASTA
+            [1, 600, "nbase", "A", "G", 0.3, 1.2, 0.02, 1e-6, 5000],    # the GRCh38 base is N
+            [1, 700, "nindel", "A", "GTT", 0.3, 1.3, 0.02, 1e-6, 5000],  # the GRCh38 sequence holds an N
             [2, 100, "nocontig", "A", "G", 0.3, 1.1, 0.02, 1e-6, 5000],  # chromosome absent from the FASTA
         ]
         raw = write_table(tmp / "gwas.tsv", HEADER, rows)
@@ -110,7 +112,11 @@ class ReferenceAlignmentStepTest(unittest.TestCase):
         with self.subTest("no reference sequence at the position: kept as reported (HM unverified)"):
             self.assertEqual(written(("1", 5000)), ("G", "A", "1", "0.3", "unverified"))
             self.assertEqual(written(("2", 100)), ("G", "A", "1.1", "0.3", "unverified"))
-            self.assertEqual(summary["unalignable_kept"], 2)
+            self.assertEqual(summary["unalignable_kept"], 4)
+
+        with self.subTest("an N in the GRCh38 sequence counts as no reference sequence (HM unverified)"):
+            self.assertEqual(written(("1", 600)), ("G", "A", "1.2", "0.3", "unverified"))
+            self.assertEqual(written(("1", 700)), ("GTT", "A", "1.3", "0.3", "unverified"))
 
         with self.subTest("the step log counts the rows alignment removed"):
             step = next(s for s in result.qc["steps"] if s["title"] == "GRCh38 reference alignment")

@@ -44,7 +44,8 @@ def opengwas_id(location: str) -> str:
     """Dataset ID such as ieu-b-5129, ukb-d-30780_irnt or ebi-a-GCST90000123, with its case preserved."""
     dataset = opengwas_dataset_id(location)
     if not dataset:
-        raise config_error(f"Could not find an OpenGWAS dataset ID in: {location}")
+        print(f"Could not find an OpenGWAS dataset ID in: {location}", file=sys.stderr)
+        raise SystemExit(65)  # this row only (EX_DATAERR); a token problem (EX_CONFIG) stops the run
     return dataset
 
 

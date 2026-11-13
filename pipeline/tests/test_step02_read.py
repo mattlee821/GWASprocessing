@@ -189,15 +189,13 @@ class Step02ReadTest(unittest.TestCase):
                              {"ES": "-0.2", "SE": "0.04", "LP": "2", "AF": "0.4", "SS": "4000"})
 
         with self.subTest("A multi-allelic GWAS-VCF record becomes 1 row per ALT allele"):
-            raw = write_vcf(self.tmp / "multi.gwas.vcf", [("1", 1100, "rs1", "G", "A,T", "0.1,0.2:0.02,0.03:6,4:0.3,0.1:5000,5000"),
+            raw = write_vcf(self.tmp / "multi.gwas.vcf", [("1", 1100, "rs1", "G", "A,T", "0.1,0.2:0.02,0.03:6,4:0.3,0.1:5000"),
                                                           ("1", 1200, "rs2", "C", "T", "0.1:0.02:6:0.3:5000")])
             result = run_standardise(self.tmp, raw, self.reference, name="multi")
-            if result.returncode != 0 and "matching element counts" in result.stderr:
-                self.skipTest("known pipeline defect: vcf_records_to_table cannot split multi-allelic records "
-                              "(pandas explode on FORMAT columns of unequal length); see the step 2 report")
             self.assertEqual(result.returncode, 0, result.stderr)
-            split = sorted((r["POS"], r["REF"], r["ALT"], r["FORMAT"]["ES"]) for r in result.rows if r["POS"] == 1100)
-            self.assertEqual(split, [(1100, "G", "A", "0.1"), (1100, "G", "T", "0.2")])
+            split = sorted((r["POS"], r["REF"], r["ALT"], r["FORMAT"]["ES"], r["FORMAT"]["SS"]) for r in result.rows if r["POS"] == 1100)
+            # SS has 1 value for the record, so it applies to both ALT alleles
+            self.assertEqual(split, [(1100, "G", "A", "0.1", "5000"), (1100, "G", "T", "0.2", "5000")])
 
         # --- PLINK ----------------------------------------------------------------------------------------------
         with self.subTest("A PLINK table with REF, ALT and A1 derives the other allele from REF and ALT"):

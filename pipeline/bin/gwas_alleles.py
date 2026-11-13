@@ -142,19 +142,30 @@ def resolve_palindromic_strand(frame: pd.DataFrame, qc: dict[str, Any], toleranc
     return out
 
 
-def deduplicate(frame: pd.DataFrame) -> tuple[pd.DataFrame, int]:
-    """Keep the first record per (CHR, POS38, unordered allele pair); never keyed on rsID."""
-    low, high = dedup_alleles(frame)
+def deduplicate(frame: pd.DataFrame, action: np.ndarray | None = None) -> tuple[pd.DataFrame, int]:
+    """Keep the first record per (CHR, POS38, allele pair from dedup_alleles); never keyed on rsID."""
+    low, high = dedup_alleles(frame, action)
     key = pd.DataFrame({"KEY": position_key(frame["CHR"], frame["POS38"]), "LOW": low, "HIGH": high})
     duplicate = key.duplicated(keep="first").to_numpy()
     return frame[~duplicate], int(duplicate.sum())
 
 
-def dedup_alleles(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-    """The unordered allele pair (LOW, HIGH) that deduplicate() keys on, with CHR and POS38."""
+ALIGNED_ACTIONS = ("keep", "swap", "complement", "complement_swap")
+
+
+def dedup_alleles(frame: pd.DataFrame, action: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """The allele pair (LOW, HIGH) that deduplicate() keys on, with CHR and POS38.
+
+    A row aligned to the GRCh38 reference (action from orient_to_reference) is keyed on (REF, ALT) in that order, so an
+    insertion and a deletion at the same position stay apart (G>GCA and GCA>G). Any other row is keyed on the unordered
+    pair, so the same variant reported either way round is still found."""
     ea, oa = upper_alleles(frame["EA"]).to_numpy(), upper_alleles(frame["OA"]).to_numpy()
     first = ea <= oa
-    return np.where(first, ea, oa), np.where(first, oa, ea)
+    low, high = np.where(first, ea, oa), np.where(first, oa, ea)
+    if action is not None:
+        aligned = np.isin(action, ALIGNED_ACTIONS)
+        low, high = np.where(aligned, oa, low), np.where(aligned, ea, high)
+    return low, high
 
 
 def af_moments(frame: pd.DataFrame) -> dict[str, float]:
@@ -300,7 +311,7 @@ def reference_alignment(chrom: pd.Series, pos: pd.Series, ea: pd.Series, oa: pd.
     Actions: keep, swap (effect allele is the reference base), complement (other allele's complement is the
     reference: reverse-strand report), complement_swap, drop (SNV whose alleles cannot match the reference),
     indel_unmatched (indel whose alleles do not match the reference sequence; removed, as REF must match the
-    genome), unalignable (no reference sequence at the position; kept).
+    genome), unalignable (no reference sequence at the position, or an N in it; kept).
     """
     chroms = normalize_chromosome_series(pd.Series(chrom).reset_index(drop=True)).astype(str).to_numpy()
     positions = numeric_series(pd.Series(pos).reset_index(drop=True)).to_numpy(dtype="float64")
@@ -322,7 +333,7 @@ def reference_alignment(chrom: pd.Series, pos: pd.Series, ea: pd.Series, oa: pd.
         rows = np.where((chroms == c) & snv)[0]
         if len(rows):
             ref = fasta.bases(c, positions[rows].astype("int64"))
-            has = ref != ""
+            has = np.isin(ref, ["A", "C", "G", "T"])  # an N (or no sequence) leaves the variant unverified
             r_oa, r_ea = oa_arr[rows] == ref, ea_arr[rows] == ref
             r_coa = ~pal[rows] & (comp_oa[rows] == ref)
             r_cea = ~pal[rows] & (comp_ea[rows] == ref)
@@ -341,7 +352,11 @@ def reference_alignment(chrom: pd.Series, pos: pd.Series, ea: pd.Series, oa: pd.
                 seq_ea[sel] = fasta.bases(c, positions[rows][sel].astype("int64"), int(length_value))
             matched_oa = seq_oa == oa_arr[rows]
             matched_ea = ~matched_oa & (seq_ea == ea_arr[rows])
-            action[rows] = np.where(matched_oa, "keep", np.where(matched_ea, "swap", "indel_unmatched"))
+            # a window that runs off the sequence or holds an N cannot be checked: kept as unverified
+            unknown = ~(pd.Series(seq_oa, dtype=object).str.fullmatch(r"[ACGT]+").fillna(False).to_numpy(dtype=bool)
+                        & pd.Series(seq_ea, dtype=object).str.fullmatch(r"[ACGT]+").fillna(False).to_numpy(dtype=bool))
+            action[rows] = np.where(matched_oa, "keep", np.where(matched_ea, "swap",
+                                                                 np.where(unknown, "unalignable", "indel_unmatched")))
     return pd.DataFrame({"action": action})
 
 

@@ -125,7 +125,7 @@ def resolve_trait_metadata(record: dict[str, Any]) -> dict[str, str]:
     raw_ancestry = str(record.get("ancestry", "") or "").strip()
     ancestry = resolve_ancestry(raw_ancestry) or ""
     if ancestry not in SUPER_POPULATIONS:
-        raise config_error(
+        raise data_error(
             f"Manifest row {record.get('study_id', '')}/{record.get('output_id', '')} has missing or "
             f"unrecognised ancestry '{raw_ancestry}'. Set ancestry to a super-population code "
             f"({', '.join(SUPER_POPULATIONS)}) so the VCF header ##ancestry is populated."
@@ -457,7 +457,7 @@ def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[
         qc["build_detection"].update({"build": detected, "method": "detected"})
         return detected
     if not declared:
-        raise config_error(
+        raise data_error(
             f"Row {record.get('study_id')}/{record.get('output_id')}: could not detect the genome build from the data "
             f"(GRCh37 hits {detection.get('hits_hg19', 0)}, GRCh38 hits {detection.get('hits_hg38', 0)} of "
             f"{detection.get('sampled', 0)} sampled positions) and none is declared. Set input_build (hg19 or hg38) in the "
@@ -854,7 +854,7 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], fasta: Any, pa
         qc["indels_left_aligned"] = moved
     else:
         action = np.full(len(out), "unalignable", dtype=object)
-    low, high = alleles.dedup_alleles(out)  # unordered allele pair: the same variant reported either way round matches
+    low, high = alleles.dedup_alleles(out, action)
     out["HM"] = harmonisation_action(out["PAL"].to_numpy(dtype=object), action, out["STRAND_CHANGED"].to_numpy(dtype=bool))
     lap("grch38_alignment")
     # optional FORMAT fields (SS, NC, EZ, SI) are written when the first piece has values for them (a VCF header may
@@ -926,7 +926,7 @@ def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.n
 def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
                  decisions: dict[str, Any], fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None,
                  reference_root: str = "", population: str = "") -> None:
-    """Sort all pieces by position, remove duplicates, drop alignment failures, then write the header (whose
+    """Sort all pieces by position, drop alignment failures, remove duplicates, then write the header (whose
     ##SAMPLE counts are final only now) in front of the body, bgzip and index."""
     timings = {} if timings is None else timings
     started = time.perf_counter()
@@ -961,15 +961,15 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
             subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
         for line in proc.stdout:
             rank, pos, _row, low, high, action, lp, filled, no_af, es, ss, record_line = line.split("\t", 11)
+            actions[action] = actions.get(action, 0) + 1
+            if action in alleles.REMOVED_ACTIONS:  # alignment failures go first, so they never displace a usable copy
+                continue
             if (rank, pos) != current:
                 current, seen = (rank, pos), set()
             if (low, high) in seen:
                 duplicates += 1
                 continue
             seen.add((low, high))
-            actions[action] = actions.get(action, 0) + 1
-            if action in alleles.REMOVED_ACTIONS:
-                continue
             batch.append(record_line)
             if len(batch) >= 500_000:
                 flush(out)
@@ -1019,9 +1019,10 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     timings["compress_and_index"] = time.perf_counter() - started
 
 
-# OpenGWAS QC flags (opengwas-reports funcs/flags.R): flags for a reviewer, never a reason to stop.
+# OpenGWAS QC flags (opengwas-reports funcs/flags.R): flags for a reviewer, never a reason to stop. The frequency
+# flag uses the signed correlation: frequencies are compared after alignment, so a negative one is a fault.
 FLAG_RULES = {
-    "af_correlation": "absolute correlation of study and 1000 Genomes allele frequencies below 0.7",
+    "af_correlation": "correlation of study and 1000 Genomes allele frequencies below 0.7 (negative included)",
     "inflation_factor": "lambda GC above 1.2",
     "n": "maximum sample size below 10,000",
     "mean_EFFECT_05": "absolute mean effect above 0.5",
@@ -1041,7 +1042,7 @@ def qc_flags(qc: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
         max_n = sum(float(t) for t in totals if t is not None) or None
     mean_effect = metrics.get("mean_effect")
     raised = {
-        "af_correlation": r is not None and abs(r) < 0.7,
+        "af_correlation": r is not None and r < 0.7,  # OpenGWAS uses abs(r); a negative r means swapped alleles
         "inflation_factor": lam is not None and lam > 1.2,
         "n": max_n is not None and max_n < 10_000,
         "mean_EFFECT_05": mean_effect is not None and abs(mean_effect) > 0.5,
@@ -1122,7 +1123,7 @@ def merge_piece_qc(qc: dict[str, Any], results: list[dict[str, Any]], record: di
     """Pool the pieces' QC into `qc`; returns the pooled frequency moments. Fails if pieces disagree on the build."""
     builds = {r["decisions"]["build"] for r in results if r["decisions"].get("build")}
     if len(builds) > 1:
-        raise config_error(f"Row {record.get('study_id')}/{record.get('output_id')}: pieces of the table match different "
+        raise data_error(f"Row {record.get('study_id')}/{record.get('output_id')}: pieces of the table match different "
                            f"genome builds ({', '.join(sorted(builds))}). Set input_build in the manifest or study YAML.")
     moments = {"n": 0, "mean_x": 0.0, "mean_y": 0.0, "m2_x": 0.0, "m2_y": 0.0, "c_xy": 0.0, "far": 0}
     for result in results:
@@ -1315,6 +1316,13 @@ def vcf_records_to_table(chunk: pd.DataFrame, sample_column: int) -> pd.DataFram
         split = ["EA", *VCF_FORMAT_COLUMNS.values()]
         for column in split:
             out[column] = out[column].astype(str).str.split(",")
+        # A field with 1 value (or none) applies to every ALT allele; one whose count matches neither is left missing.
+        alleles = out.loc[multi, "EA"].str.len()
+        for column in split[1:]:
+            lists = out.loc[multi, column]
+            out.loc[multi, column] = pd.Series(
+                [values if len(values) == n else values * n if len(values) == 1 else [""] * n
+                 for values, n in zip(lists, alleles)], index=lists.index, dtype=object)
         exploded = out[multi].explode(split)
         out = pd.concat([out[~multi].assign(**{c: out.loc[~multi, c].str[0] for c in split}), exploded])
         out = out.sort_index(kind="stable").reset_index(drop=True)
