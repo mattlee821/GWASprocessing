@@ -36,6 +36,28 @@ load_settings() {
     echo "Note: no .env in $1. Run 'bash src/source.sh --env-only' to create it from .env.example; using the" \
          "environment and built-in defaults." >&2
   fi
+  activate_tools "$1"
+}
+
+# activate_tools ROOT: put the tool environment that src/source.sh created (GWAS_ENV, relative to ROOT or absolute)
+# first on PATH, so python3, nextflow, bgzip, tabix, plink2 and bcftools all come from it, point bcftools at the
+# plugins built into it, and point Java at the environment's (NXF_JAVA_HOME, if set, still wins for Nextflow). Inside the container image (GWAS_IN_CONTAINER=1) the image's own tools are used instead.
+activate_tools() {
+  local env="${GWAS_ENV:-}"
+  [[ -n "${GWAS_IN_CONTAINER:-}" || -z "${env}" ]] && return 0
+  [[ "${env}" == /* ]] || env="$1/${env}"
+  [[ -d "${env}/bin" ]] || return 0
+  case ":${PATH}:" in
+    *":${env}/bin:"*) ;;
+    *) export PATH="${env}/bin:${PATH}" ;;
+  esac
+  if [[ -z "${BCFTOOLS_PLUGINS:-}" && -d "${env}/libexec/bcftools" ]]; then
+    export BCFTOOLS_PLUGINS="${env}/libexec/bcftools"
+  fi
+  # The environment's Java (conda openjdk lives in lib/jvm and is normally found through activation), for Nextflow.
+  if [[ -x "${env}/lib/jvm/bin/java" && -z "${NXF_JAVA_HOME:-}" ]]; then
+    export JAVA_HOME="${env}/lib/jvm" JAVA_LD_LIBRARY_PATH="${env}/lib/jvm/lib/server"
+  fi
 }
 
 # require_real_path NAME VALUE: stop while a path still holds a /WHERE/... placeholder.

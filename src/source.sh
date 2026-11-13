@@ -2,22 +2,22 @@
 # Install the tools GWASprocessing needs and build or download its reference data.
 #
 # Usage:
-#   bash src/source.sh                  # tools + Python packages, then all reference data
-#   bash src/source.sh --tools-only     # only install/verify tools and Python packages
-#   bash src/source.sh --reference-only # only build/download reference data (tools must exist)
-#   bash src/source.sh --force          # rebuild the built reference lookups (dbSNP index and merge map, 1000 Genomes, build sample)
-#   bash src/source.sh --r-packages     # only install the R packages for the R audit test (gwasvcf, VariantAnnotation)
-#   bash src/source.sh --env-only       # only create or complete .env
+#   bash src/source.sh                       # tools, then all reference data
+#   bash src/source.sh --tools-only          # only the tool environment (and bcftools with the liftover plugin)
+#   bash src/source.sh --reference-only      # only download and build the reference data (tools must exist)
+#   bash src/source.sh --container apptainer # run the pipeline steps in the published image (or: docker)
+#   bash src/source.sh --force               # rebuild the built references (and re-pull the container image)
+#   bash src/source.sh --r-packages          # only the R packages for the R reader test (gwasvcf, VariantAnnotation)
+#   bash src/source.sh --env-only            # only create or complete .env
 #
-# Every run first creates .env from .env.example if it is missing and fills in the data paths; tool locations
-# (PLINK2, NEXTFLOW, GWAS_VENV, GWAS_BCFTOOLS, BCFTOOLS_PLUGINS) are written to .env as they are installed. Values
-# already in .env are kept. The only setting to add by hand is OPENGWAS_JWT.
+# Needs only bash, curl and tar. Every run first creates .env from .env.example if it is missing and fills in the
+# data paths; the tool environment (GWAS_ENV), NEXTFLOW, PLINK2, GWAS_BCFTOOLS and BCFTOOLS_PLUGINS are written to
+# .env as they are installed. Values already in .env are kept. The only setting to add by hand is OPENGWAS_JWT.
 # Idempotent: every step skips work whose output already exists, so it is safe to re-run after an
 # interruption. Run it with bash; sourcing it only defines its functions.
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REFDATA="${ROOT_DIR}/src/reference_data"
-TOOLS_DIR="${ROOT_DIR}/.tools/bin"
 ENV_FILE="${ROOT_DIR}/.env"
 REQUIRED_MODULES="numpy, pandas, yaml, requests, matplotlib, certifi"
 # shellcheck source=src/lib/env.sh
@@ -103,125 +103,212 @@ remind_token() {
   fi
 }
 
-install_plink2() {
-  if command -v "${PLINK2:-plink2}" >/dev/null 2>&1 && "${PLINK2:-plink2}" --version >/dev/null 2>&1; then
-    echo "plink2: found ($(command -v "${PLINK2:-plink2}"))"
-    return
-  fi
-  local url
-  case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_mac_arm64_20260504.zip}" ;;
-    Darwin-x86_64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_mac_avx2_20260504.zip}" ;;
-    Linux-x86_64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_avx2_20260504.zip}" ;;
-    Linux-aarch64|Linux-arm64) url="${PLINK2_URL:-https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_arm64_20260504.zip}" ;;
-    *) echo "No known plink2 build for $(uname -s)-$(uname -m). Set PLINK2=/path/to/plink2 in .env." >&2; return 1 ;;
-  esac
-  echo "plink2: installing from ${url}"
-  mkdir -p "${TOOLS_DIR}"
-  curl -fsSL -o "${TOOLS_DIR}/plink2.zip" "${url}"
-  (cd "${TOOLS_DIR}" && unzip -o plink2.zip plink2 >/dev/null)
-  chmod +x "${TOOLS_DIR}/plink2"
-  rm -f "${TOOLS_DIR}/plink2.zip"
-  xattr -d com.apple.quarantine "${TOOLS_DIR}/plink2" 2>/dev/null || true
-  set_env_var PLINK2 "${TOOLS_DIR}/plink2"
-}
-
-install_nextflow() {
-  if [[ -n "${NEXTFLOW:-}" && -x "${NEXTFLOW}" ]]; then
-    echo "nextflow: found (${NEXTFLOW})"
-  elif command -v nextflow >/dev/null 2>&1; then
-    echo "nextflow: found ($(command -v nextflow))"
-  elif [[ -x "${TOOLS_DIR}/nextflow" ]]; then
-    set_env_var NEXTFLOW "${TOOLS_DIR}/nextflow"
-    echo "nextflow: found (${TOOLS_DIR}/nextflow)"
-  else
-    echo "nextflow: installing into ${TOOLS_DIR}"
-    mkdir -p "${TOOLS_DIR}"
-    (cd "${TOOLS_DIR}" && curl -fsSL https://get.nextflow.io | bash >/dev/null)
-    chmod +x "${TOOLS_DIR}/nextflow"
-    set_env_var NEXTFLOW "${TOOLS_DIR}/nextflow"
-  fi
-}
-
-install_htslib() {
-  if command -v bgzip >/dev/null 2>&1 && command -v tabix >/dev/null 2>&1; then
-    echo "bgzip/tabix: found ($(command -v bgzip))"
-    return
-  fi
-  echo "bgzip/tabix: not found, attempting install"
-  if command -v brew >/dev/null 2>&1; then
-    brew install htslib
-  elif command -v mamba >/dev/null 2>&1; then
-    mamba install -y -c bioconda -c conda-forge htslib
-  elif command -v conda >/dev/null 2>&1; then
-    conda install -y -c bioconda -c conda-forge htslib
-  elif command -v apt-get >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo apt-get update -y && sudo apt-get install -y tabix
-  elif command -v yum >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-    sudo yum install -y htslib
-  fi
-  if ! command -v bgzip >/dev/null 2>&1 || ! command -v tabix >/dev/null 2>&1; then
-    echo "bgzip/tabix are required. Install htslib (e.g. 'module load htslib' on a cluster) and re-run." >&2
-    return 1
-  fi
-}
-
-install_python_packages() {
-  local python="python3"
-  if [[ -n "${GWAS_VENV:-}" && -x "${ROOT_DIR}/${GWAS_VENV#./}/bin/python3" ]]; then
-    python="${ROOT_DIR}/${GWAS_VENV#./}/bin/python3"
-  fi
-  if "${python}" -c "import ${REQUIRED_MODULES}" 2>/dev/null; then
-    echo "python packages: already available (${python})"
-    return
-  fi
-  echo "python packages: installing from requirements.txt"
-  if [[ -z "${GWAS_VENV:-}" ]] && python3 -m pip install --quiet -r "${ROOT_DIR}/requirements.txt"; then
-    return
-  fi
-  # A system Python that refuses pip installs (PEP 668) or a configured GWAS_VENV: use a project virtualenv.
-  local venv="${GWAS_VENV:-.venv}"
-  venv="${venv#./}"
-  if [[ ! -x "${ROOT_DIR}/${venv}/bin/python3" ]]; then
-    python3 -m venv "${ROOT_DIR}/${venv}"
-  fi
-  "${ROOT_DIR}/${venv}/bin/python3" -m pip install --quiet -r "${ROOT_DIR}/requirements.txt"
-  set_env_var GWAS_VENV "${venv}"
-  echo "python packages: installed into ${ROOT_DIR}/${venv} (src/standardise.sh puts it first on PATH)"
-}
-
-# BCFtools/liftover (Genovese et al. 2024) is a bcftools plugin that is not packaged with bcftools: build bcftools with
-# it from source into GWAS_TOOLS_ROOT (default .tools), then record GWAS_BCFTOOLS and BCFTOOLS_PLUGINS in .env.
-# It is required: GRCh37 inputs are lifted with it, and the build-detection sample is built with it.
+# ---- Tools ------------------------------------------------------------------------------------------------------
+# Everything the pipeline runs (Java, Nextflow, Python and its packages, bgzip/tabix, plink2, and bcftools with the
+# BCFtools/liftover plugin) is installed into 1 private environment under GWAS_TOOLS_ROOT (default .tools), from
+# environment.yml, with micromamba (1 static binary, no administrator rights). Nothing outside GWAS_TOOLS_ROOT is
+# changed. The scripts put the environment first on PATH (src/lib/env.sh, activate_tools). A tool path the user has
+# set in .env (NEXTFLOW, PLINK2, GWAS_BCFTOOLS, BCFTOOLS_PLUGINS) is kept.
 BCFTOOLS_VERSION="${BCFTOOLS_VERSION:-1.25}"
+LIFTOVER_URL="${LIFTOVER_URL:-https://raw.githubusercontent.com/freeseek/score/master/liftover.c}"
+CONTAINER_REF="${GWAS_CONTAINER_REF:-ghcr.io/mattlee821/gwasprocessing:latest}"
+
+tools_root() {
+  local root="${GWAS_TOOLS_ROOT:-.tools}"
+  [[ "${root}" == /* ]] || root="${ROOT_DIR}/${root}"
+  printf '%s\n' "${root}"
+}
+
+mamba_platform() {
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) echo osx-arm64 ;;
+    Darwin-x86_64) echo osx-64 ;;
+    Linux-x86_64) echo linux-64 ;;
+    Linux-aarch64|Linux-arm64) echo linux-aarch64 ;;
+    *) echo "Unsupported platform $(uname -s)-$(uname -m): install the tools in environment.yml yourself and set" \
+            "GWAS_ENV, NEXTFLOW and GWAS_BCFTOOLS in .env." >&2; return 1 ;;
+  esac
+}
+
+# set_tool KEY PATH: record a tool in .env unless the user already points KEY at a working program.
+set_tool() {
+  local current
+  current="$(env_value "${ENV_FILE}" "$1")"
+  if [[ -n "${current}" && "${current}" != "$2" && -x "${current}" ]]; then
+    echo "$1: keeping ${current} from .env"
+    return
+  fi
+  set_env_var "$1" "$2"
+}
+
+install_micromamba() {
+  local root bin platform
+  root="$(tools_root)"
+  bin="${root}/bin/micromamba"
+  if [[ ! -x "${bin}" ]]; then
+    platform="$(mamba_platform)"
+    echo "micromamba: downloading for ${platform} into ${root}/bin"
+    mkdir -p "${root}"
+    curl -fsSL "https://micro.mamba.pm/api/micromamba/${platform}/latest" | tar -xj -C "${root}" bin/micromamba
+    chmod +x "${bin}"
+  fi
+  MAMBA_BIN="${bin}"
+  export MAMBA_ROOT_PREFIX="${root}/mamba"  # package cache, kept inside the tools folder
+}
+
+file_hash() { (shasum -a 256 "$1" 2>/dev/null || sha256sum "$1") | awk '{print $1}'; }
+
+# install_environment: create or update the tool environment from environment.yml; skipped while environment.yml is
+# unchanged since the last install.
+install_environment() {
+  local root prefix spec stamp hash
+  root="$(tools_root)"
+  prefix="${root}/env"
+  spec="${ROOT_DIR}/environment.yml"
+  stamp="${prefix}/.environment.yml.sha256"
+  hash="$(file_hash "${spec}")"
+  install_micromamba
+  if [[ -f "${stamp}" && "$(cat "${stamp}")" == "${hash}" ]]; then
+    echo "tool environment: up to date (${prefix})"
+  elif [[ -d "${prefix}/conda-meta" ]]; then
+    echo "tool environment: updating ${prefix} from environment.yml"
+    "${MAMBA_BIN}" install -y -q -p "${prefix}" -f "${spec}"
+  else
+    echo "tool environment: creating ${prefix} from environment.yml (several minutes the first time)"
+    "${MAMBA_BIN}" create -y -q -p "${prefix}" -f "${spec}"
+  fi
+  printf '%s\n' "${hash}" > "${stamp}"
+  ENV_PREFIX="${prefix}"
+  set_env_var GWAS_ENV "${prefix}"
+  activate_tools "${ROOT_DIR}"
+  set_tool NEXTFLOW "${prefix}/bin/nextflow"
+  if [[ -z "${GWAS_CONTAINER:-}" ]]; then
+    ensure_plink2 "${prefix}"
+    set_tool PLINK2 "${prefix}/bin/plink2"
+  fi
+}
+
+# ensure_plink2 PREFIX: some conda plink2 builds link to libraries outside the environment (the osx-64 build looks for
+# Homebrew's zstd); when the environment's plink2 does not run, put the official static build in its place.
+ensure_plink2() {
+  local prefix="$1" url
+  ( "${prefix}/bin/plink2" --version ) >/dev/null 2>&1 && return 0  # subshell: a crashing binary prints nothing
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) url="https://s3.amazonaws.com/plink2-assets/alpha7/plink2_mac_arm64_20260504.zip" ;;
+    Darwin-x86_64) url="https://s3.amazonaws.com/plink2-assets/alpha7/plink2_mac_avx2_20260504.zip" ;;
+    Linux-x86_64) url="https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_avx2_20260504.zip" ;;
+    Linux-aarch64|Linux-arm64) url="https://s3.amazonaws.com/plink2-assets/alpha7/plink2_linux_arm64_20260504.zip" ;;
+    *) echo "plink2 from the environment does not run; set PLINK2 in .env" >&2; return 1 ;;
+  esac
+  url="${PLINK2_URL:-${url}}"
+  echo "plink2: the environment's build does not run here; installing the official build from ${url}"
+  curl -fsSL -o "${prefix}/plink2.zip" "${url}"
+  rm -f "${prefix}/bin/plink2"
+  "${prefix}/bin/python3" -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extract("plink2", sys.argv[2])' \
+    "${prefix}/plink2.zip" "${prefix}/bin"
+  rm -f "${prefix}/plink2.zip"
+  chmod +x "${prefix}/bin/plink2"
+  xattr -d com.apple.quarantine "${prefix}/bin/plink2" 2>/dev/null || true
+  "${prefix}/bin/plink2" --version >/dev/null
+}
+
+# BCFtools/liftover (Genovese et al. 2024) is a bcftools plugin that no package provides: build bcftools from source
+# into the tool environment, with the environment's compiler and its htslib, so `bcftools` there lists the plugin.
+# It is required: GRCh37 inputs are lifted with it, and the build-detection sample is built with it.
 install_bcftools_liftover() {
-  if [[ -n "${GWAS_BCFTOOLS:-}" && -x "${GWAS_BCFTOOLS}" ]] && BCFTOOLS_PLUGINS="${BCFTOOLS_PLUGINS:-}" "${GWAS_BCFTOOLS}" plugin -l 2>/dev/null | grep -qx liftover; then
+  local plugins="${BCFTOOLS_PLUGINS:-}" src
+  if [[ -n "${GWAS_BCFTOOLS:-}" && -x "${GWAS_BCFTOOLS}" ]] \
+      && BCFTOOLS_PLUGINS="${plugins}" "${GWAS_BCFTOOLS}" plugin -l 2>/dev/null | grep -qx liftover; then
     echo "bcftools +liftover: found (${GWAS_BCFTOOLS})"
     return
   fi
-  if command -v bcftools >/dev/null 2>&1 && bcftools plugin -l 2>/dev/null | grep -qx liftover; then
-    echo "bcftools +liftover: found on PATH ($(command -v bcftools))"
-    return
+  if [[ -x "${ENV_PREFIX}/bin/bcftools" ]] \
+      && BCFTOOLS_PLUGINS="${ENV_PREFIX}/libexec/bcftools" "${ENV_PREFIX}/bin/bcftools" plugin -l 2>/dev/null | grep -qx liftover; then
+    echo "bcftools +liftover: found (${ENV_PREFIX}/bin/bcftools)"
+  else
+    src="$(tools_root)/src/bcftools-${BCFTOOLS_VERSION}"
+    echo "bcftools +liftover: building bcftools ${BCFTOOLS_VERSION} with the liftover plugin into ${ENV_PREFIX}"
+    mkdir -p "$(dirname "${src}")"
+    if [[ ! -d "${src}" ]]; then
+      curl -fsSL "https://github.com/samtools/bcftools/releases/download/${BCFTOOLS_VERSION}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" \
+        | tar -xj -C "$(dirname "${src}")"
+    fi
+    curl -fsSL -o "${src}/plugins/liftover.c" "${LIFTOVER_URL}"
+    # The environment's compiler and its htslib, named explicitly (no activation needed); on macOS the compiler uses
+    # the system SDK when the Command Line Tools provide one.
+    local sdk=""
+    [[ "$(uname -s)" == Darwin ]] && sdk="$(xcrun --show-sdk-path 2>/dev/null || true)"
+    if ! (cd "${src}" && export PATH="${ENV_PREFIX}/bin:${PATH}" CC="${ENV_PREFIX}/bin/cc" \
+            CPPFLAGS="-I${ENV_PREFIX}/include" LDFLAGS="-L${ENV_PREFIX}/lib -Wl,-rpath,${ENV_PREFIX}/lib" \
+            ${sdk:+SDKROOT="${sdk}"} \
+          && ./configure --prefix="${ENV_PREFIX}" --with-htslib=system --disable-libgsl --disable-perl-filters >build.log 2>&1 \
+          && make -j4 >>build.log 2>&1 && make install >>build.log 2>&1); then
+      echo "Error: could not build bcftools with the liftover plugin; see ${src}/build.log. Set GWAS_BCFTOOLS and" \
+           "BCFTOOLS_PLUGINS in .env to use an existing build." >&2
+      return 1
+    fi
   fi
-  local root="${GWAS_TOOLS_ROOT:-${ROOT_DIR}/.tools}" dir
-  dir="${root}/bcftools-${BCFTOOLS_VERSION}"
-  echo "bcftools +liftover: building bcftools ${BCFTOOLS_VERSION} with the liftover plugin in ${dir}"
-  if ! { mkdir -p "${root}" \
-        && { [[ -d "${dir}" ]] || { curl -fsSL -o "${root}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" \
-               "https://github.com/samtools/bcftools/releases/download/${BCFTOOLS_VERSION}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" \
-             && tar -xjf "${root}/bcftools-${BCFTOOLS_VERSION}.tar.bz2" -C "${root}" \
-             && rm -f "${root}/bcftools-${BCFTOOLS_VERSION}.tar.bz2"; }; } \
-        && curl -fsSL -o "${dir}/plugins/liftover.c" https://raw.githubusercontent.com/freeseek/score/master/liftover.c \
-        && (cd "${dir}" && ./configure --disable-libcurl --disable-lzma --disable-bz2 --without-curses >/dev/null \
-            && (cd "htslib-${BCFTOOLS_VERSION}" && ./configure --disable-libcurl --disable-lzma --disable-bz2 >/dev/null) \
-            && make -j4 >/dev/null); } 2>/dev/null; then
-    echo "Error: could not build bcftools with the liftover plugin (needs a C compiler, make and zlib). Install them" \
-         "and re-run, or set GWAS_BCFTOOLS and BCFTOOLS_PLUGINS in .env to an existing build." >&2
-    return 1
-  fi
-  set_env_var GWAS_BCFTOOLS "${dir}/bcftools"
-  set_env_var BCFTOOLS_PLUGINS "${dir}/plugins"
-  echo "bcftools +liftover: built (${dir}/bcftools)"
+  set_env_var GWAS_BCFTOOLS "${ENV_PREFIX}/bin/bcftools"
+  set_env_var BCFTOOLS_PLUGINS "${ENV_PREFIX}/libexec/bcftools"
+  "${ENV_PREFIX}/bin/bcftools" plugin -l | grep -qx liftover
+  echo "bcftools +liftover: ready (${ENV_PREFIX}/bin/bcftools)"
+}
+
+# ---- Container (optional) ---------------------------------------------------------------------------------------
+# With --container apptainer|docker (or GWAS_CONTAINER in .env) the pipeline steps run inside the published image,
+# which holds the same tools; the host keeps only the environment above for Nextflow, Java and the run wrapper, and
+# bcftools is not built on the host. The reference build also runs inside the image.
+install_container_image() {
+  local root sif cmd
+  root="$(tools_root)"
+  case "${GWAS_CONTAINER}" in
+    apptainer|singularity)
+      cmd="$(command -v apptainer || command -v singularity || true)"
+      if [[ -z "${cmd}" ]]; then
+        echo "Error: GWAS_CONTAINER=${GWAS_CONTAINER} but neither apptainer nor singularity is on PATH (try 'module load apptainer')." >&2
+        return 1
+      fi
+      sif="${root}/gwasprocessing.sif"
+      if [[ ! -s "${sif}" || "${FORCE}" -eq 1 ]]; then
+        echo "container: pulling ${CONTAINER_REF} into ${sif}"
+        mkdir -p "${root}"
+        "${cmd}" pull --force "${sif}" "docker://${CONTAINER_REF}"
+      else
+        echo "container: found ${sif}"
+      fi
+      set_env_var GWAS_CONTAINER_IMAGE "${sif}" ;;
+    docker)
+      if ! command -v docker >/dev/null 2>&1; then
+        echo "Error: GWAS_CONTAINER=docker but docker is not on PATH." >&2
+        return 1
+      fi
+      echo "container: pulling ${CONTAINER_REF}"
+      docker pull "${CONTAINER_REF}"
+      set_env_var GWAS_CONTAINER_IMAGE "${CONTAINER_REF}" ;;
+    *) echo "Error: GWAS_CONTAINER must be apptainer or docker (got ${GWAS_CONTAINER})." >&2; return 1 ;;
+  esac
+}
+
+# in_container CMD...: run a command inside the image with the repository and reference folders mounted at the same
+# paths, so .env and the scripts work unchanged.
+in_container() {
+  local folders=("${ROOT_DIR}") folder args=() resolved
+  for folder in "${GWAS_REFERENCE_ROOT:-references}" "${GWAS_REFERENCE_RAW_ROOT:-}"; do
+    [[ -n "${folder}" ]] || continue
+    resolved="${folder}"
+    [[ "${resolved}" == /* ]] || resolved="${ROOT_DIR}/${resolved}"
+    mkdir -p "${resolved}"
+    folders+=("${resolved}")
+  done
+  case "${GWAS_CONTAINER}" in
+    apptainer|singularity)
+      for folder in "${folders[@]}"; do args+=(--bind "${folder}"); done
+      "$(command -v apptainer || command -v singularity)" exec "${args[@]}" --pwd "${ROOT_DIR}" "${GWAS_CONTAINER_IMAGE}" "$@" ;;
+    docker)
+      for folder in "${folders[@]}"; do args+=(-v "${folder}:${folder}"); done
+      docker run --rm -u "$(id -u):$(id -g)" "${args[@]}" -w "${ROOT_DIR}" \
+        -e GWAS_REFERENCE_ROOT -e GWAS_REFERENCE_RAW_ROOT -e GWAS_REFERENCE_FORCE "${GWAS_CONTAINER_IMAGE}" "$@" ;;
+  esac
 }
 
 # R packages are needed only by pipeline/tests/test_audit.py, which checks that R's gwasvcf reads the output.
@@ -245,10 +332,12 @@ install_r_packages() {
 }
 
 build_reference_data() {
+  local run=()
   [[ "${FORCE}" -eq 1 ]] && export GWAS_REFERENCE_FORCE=1
-  bash "${REFDATA}/download_fasta_and_chains.sh"
-  bash "${REFDATA}/build_grch38_references.sh"
-  python3 "${REFDATA}/validate_references.py" --reference-root "${GWAS_REFERENCE_ROOT:-${ROOT_DIR}/references}"
+  [[ -n "${GWAS_CONTAINER:-}" ]] && run=(in_container)
+  "${run[@]+"${run[@]}"}" bash "${REFDATA}/download_fasta_and_chains.sh"
+  "${run[@]+"${run[@]}"}" bash "${REFDATA}/build_grch38_references.sh"
+  "${run[@]+"${run[@]}"}" python3 "${REFDATA}/validate_references.py" --reference-root "${GWAS_REFERENCE_ROOT:-${ROOT_DIR}/references}"
 }
 
 main() {
@@ -258,19 +347,28 @@ main() {
   FORCE=0
   R_ONLY=0
   ENV_ONLY=0
-  local arg
-  for arg in "$@"; do
-    case "${arg}" in
+  local container=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
       --tools-only) TOOLS_ONLY=1 ;;
       --reference-only) REFERENCE_ONLY=1 ;;
       --force) FORCE=1 ;;
       --r-packages) R_ONLY=1 ;;
       --env-only) ENV_ONLY=1 ;;
-      -h|--help) sed -n '2,18p' "${BASH_SOURCE[0]}"; exit 0 ;;
-      *) echo "Unknown option: ${arg}" >&2; exit 2 ;;
+      --container) container="${2:-}"; shift ;;
+      --container=*) container="${1#*=}" ;;
+      -h|--help) sed -n '2,19p' "${BASH_SOURCE[0]}"; exit 0 ;;
+      *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
+    shift
   done
   ensure_env_file
+  if [[ -n "${container}" ]]; then
+    case "${container}" in
+      apptainer|singularity|docker) set_env_var GWAS_CONTAINER "${container}" >/dev/null ;;
+      *) echo "--container must be apptainer or docker" >&2; exit 2 ;;
+    esac
+  fi
   load_settings "${ROOT_DIR}"
   if [[ "${ENV_ONLY}" -eq 1 ]]; then
     remind_token
@@ -283,11 +381,12 @@ main() {
   echo "== GWASprocessing setup =="
   if [[ "${REFERENCE_ONLY}" -eq 0 ]]; then
     echo "-- Tools --"
-    install_plink2
-    install_nextflow
-    install_htslib
-    install_python_packages
-    install_bcftools_liftover
+    install_environment
+    if [[ -n "${GWAS_CONTAINER:-}" ]]; then
+      install_container_image
+    else
+      install_bcftools_liftover
+    fi
   fi
   if [[ "${TOOLS_ONLY}" -eq 0 ]]; then
     echo "-- Reference data --"

@@ -43,7 +43,7 @@ Usage: bash src/standardise.sh [options]
        sbatch src/standardise.sh [options]
 
 Options:
-  --manifest PATH       Manifest TSV. Default: $GWAS_MANIFEST or manifests/main.tsv
+  --manifest PATH       Manifest TSV. Default: $GWAS_MANIFEST or manifests/test.tsv
   --study-yaml PATH     Optional study-specific YAML overrides applied to every row.
   --profile NAME        Nextflow profile. Default: slurm inside an sbatch job, else $GWAS_PROFILE, else local
   --only-study STUDYID  Run one derived study ID, e.g. locke_2015_25673413.
@@ -57,7 +57,8 @@ Options:
 
 Environment (or .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
 GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_REPORT, GWAS_ROW_LIMIT,
-GWAS_VENV (Python virtual environment to put first on PATH), NEXTFLOW (path to the nextflow launcher).
+GWAS_ENV (tool environment from src/source.sh), GWAS_CONTAINER (apptainer or docker: run every step in the image),
+GWAS_CONTAINER_IMAGE, NEXTFLOW (path to the nextflow launcher), GWAS_VENV (older installs: Python virtual environment).
 USAGE
 }
 
@@ -75,7 +76,7 @@ resolve_path() {
   fi
 }
 
-MANIFEST="${GWAS_MANIFEST:-manifests/main.tsv}"
+MANIFEST="${GWAS_MANIFEST:-manifests/test.tsv}"
 WORK_ROOT="${GWAS_WORK_ROOT:-GWAS}"
 REFERENCE_ROOT="${GWAS_REFERENCE_ROOT:-references}"
 CONFIG_ROOT="${GWAS_CONFIG_ROOT:-manifests}"
@@ -153,6 +154,17 @@ for path in "${WORK_ROOT}" "${REFERENCE_ROOT}" "${TEMP_ROOT}" "${NEXTFLOW_WORK}"
   esac
 done
 
+# Tools: the environment from src/source.sh (GWAS_ENV) is already first on PATH (load_settings). With a container
+# (GWAS_CONTAINER=apptainer or docker in .env), every Nextflow process runs inside the GWASprocessing image.
+if [[ -n "${GWAS_CONTAINER:-}" ]]; then
+  case "${GWAS_CONTAINER}" in
+    apptainer|singularity) PROFILE="${PROFILE},apptainer" ;;
+    docker) PROFILE="${PROFILE},docker" ;;
+    *) echo "GWAS_CONTAINER must be apptainer or docker (got ${GWAS_CONTAINER})" >&2; exit 2 ;;
+  esac
+  export GWAS_CONTAINER_IMAGE="${GWAS_CONTAINER_IMAGE:-}" GWAS_TEMP_ROOT="${TEMP_ROOT}"
+fi
+# An older install's Python virtual environment (GWAS_VENV) still works, ahead of GWAS_ENV.
 if [[ -n "${GWAS_VENV:-}" ]]; then
   VENV_DIR="$(resolve_path "${GWAS_VENV}")"
   if [[ -x "${VENV_DIR}/bin/python3" ]]; then
@@ -249,6 +261,12 @@ if failed:
     print("  Details are in the Nextflow log; fix the inputs and re-run (completed rows are skipped).")
     raise SystemExit(1)
 PY
+
+# manifest.html in the work root: every GWAS processed or attempted, with status, counts, flags and links
+if [[ "${DRY_RUN}" != "true" ]]; then
+  python3 "${ROOT_DIR}/pipeline/bin/registry.py" --work-root "${WORK_ROOT}" --log-root "${LOG_ROOT}" \
+    || echo "Warning: could not update ${WORK_ROOT}/manifest.html" >&2
+fi
 
 if [[ "${status}" -ne 0 ]]; then
   exit "${status}"

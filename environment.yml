@@ -1,0 +1,33 @@
+# Tools for GWASprocessing, installed into a private environment by src/source.sh (micromamba) and into the
+# container image (Dockerfile). bcftools is not listed: src/source.sh builds bcftools 1.25 from source into this
+# environment with the BCFtools/liftover plugin, which no package provides.
+name: gwasprocessing
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  # workflow
+  - openjdk=21
+  - nextflow>=25
+  # GWAS-VCF writing, reference build and liftover
+  - htslib=1.25
+  - plink2
+  - bzip2
+  - zstd
+  - curl
+  # Python steps
+  - python=3.12
+  - numpy>=1.23,<3
+  # pandas 3 changes copy semantics that the allele swap relies on (REF can end up equal to ALT); keep 2.x until
+  # gwas_alleles.orient_to_reference copies explicitly
+  - pandas>=2.2,<3
+  - pyyaml>=6,<7
+  - requests>=2.28,<3
+  - matplotlib-base>=3.6,<4
+  - certifi
+  # building bcftools with the liftover plugin
+  - c-compiler
+  - make
+  - zlib
+  - xz
+  - libcurl

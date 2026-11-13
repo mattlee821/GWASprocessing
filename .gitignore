@@ -28,3 +28,8 @@ __pycache__/
 .Ruserdata
 .DS_Store
 ._*
+
+# Your own manifests and study YAMLs stay local; only the example manifest and its study YAML are tracked
+manifests/*
+!manifests/test.tsv
+!manifests/omara_2018_30093612.yaml

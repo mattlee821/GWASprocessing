@@ -414,7 +414,7 @@ def orient_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame
         out.loc[complement, "OA"] = complement_alleles(out.loc[complement, "OA"]).to_numpy()
     swap = np.isin(action, ["swap", "complement_swap"])
     if swap.any():
-        ea_before = out.loc[swap, "EA"].to_numpy()
+        ea_before = out.loc[swap, "EA"].to_numpy(copy=True)  # a view under pandas 3 would see the next line
         out.loc[swap, "EA"] = out.loc[swap, "OA"].to_numpy()
         out.loc[swap, "OA"] = ea_before
         out.loc[swap, "BETA"] = -numeric_series(out.loc[swap, "BETA"])

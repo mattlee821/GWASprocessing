@@ -3,7 +3,7 @@
 for the current settings, and write one JSON file per row to run (no manifest text reaches a shell).
 
 Usage:
-    prepare_manifest.py --manifest manifests/main.tsv --work-root GWAS --state-file GWAS/.standardise_state.tsv \
+    prepare_manifest.py --manifest manifests/test.tsv --work-root GWAS --state-file GWAS/.standardise_state.tsv \
         --output run_manifest.tsv --summary run_manifest_summary.json --rows-dir rows \
         [--config-root manifests] [--reference-root references] [--study-yaml extra.yaml] \
         [--only-study STUDYID] [--force false] [--report true] [--row-limit 0] [--repo-root .]

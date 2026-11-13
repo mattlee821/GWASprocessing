@@ -1,0 +1,14 @@
+# Keep settings (they hold the OpenGWAS token), local tools, data and git history out of the image.
+.env
+server.env
+.tools/
+.venv/
+.git/
+data/
+GWAS/
+references/
+temp/
+work/
+.nextflow*
+**/__pycache__/
+**/.DS_Store

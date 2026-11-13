@@ -31,8 +31,15 @@ def sandbox_env(tmp: Path, *bin_dirs: Path, **extra: str) -> dict:
     bash_dir.mkdir(exist_ok=True)
     if not (bash_dir / "bash").exists():
         (bash_dir / "bash").symlink_to(BASH)
-    path = [*map(str, bin_dirs), str(guard), str(bash_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("GWAS_", "SLURM_", "NEXTFLOW", "GWASPROCESSING_", "PLINK2"))}
+    # Only python3 from the test's interpreter folder: in a tool environment that folder also holds nextflow, bcftools
+    # and the rest, which would hide the stubs.
+    python_dir = tmp / "python_bin"
+    python_dir.mkdir(exist_ok=True)
+    if not (python_dir / "python3").exists():  # a wrapper, not a link: a link would lose a virtualenv's packages
+        write_stub(python_dir, "python3", f'exec "{sys.executable}" "$@"\n')
+    path = [*map(str, bin_dirs), str(guard), str(bash_dir), str(python_dir), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GWAS_", "SLURM_", "NEXTFLOW", "GWASPROCESSING_", "PLINK2", "BCFTOOLS", "MAMBA"))}
     env.update({"PATH": os.pathsep.join(path), "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
     env.update(extra)
     return env
@@ -59,7 +66,7 @@ def fake_repo(tmp: Path, dotenv: str = "") -> Path:
     shutil.copy(SRC / "source.sh", repo / "src" / "source.sh")
     shutil.copytree(SRC / "reference_data", repo / "src" / "reference_data")
     shutil.copytree(SRC / "lib", repo / "src" / "lib")
-    shutil.copy(ROOT / "requirements.txt", repo / "requirements.txt")
+    shutil.copy(ROOT / "environment.yml", repo / "environment.yml")
     shutil.copy(ROOT / ".env.example", repo / ".env.example")
     if dotenv:
         (repo / ".env").write_text(dotenv, encoding="utf-8")
@@ -185,6 +192,20 @@ class WrapperTests(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         self.assertTrue(self.args_file.exists())
 
+    def test_tools_come_from_the_environment_named_in_dotenv(self):
+        repo = fake_repo(self.tmp, dotenv="GWAS_WORK_ROOT=GWAS\nGWAS_ENV=.tools/env\n")
+        write_stub(repo / ".tools" / "env" / "bin", "nextflow", STUB_NEXTFLOW)
+        (self.bin / "nextflow").unlink()
+        proc = self.run_wrapper(repo)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(self.args_file.exists())
+
+    def test_a_container_adds_its_profile_and_keeps_the_local_row_limit(self):
+        repo = fake_repo(self.tmp, dotenv="GWAS_WORK_ROOT=GWAS\nGWAS_CONTAINER=apptainer\n")
+        proc = self.run_wrapper(repo)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual((self.value("-profile"), self.value("--row_limit")), ("local,apptainer", "1"))
+
 
 class SetupScriptTests(unittest.TestCase):
     def setUp(self):
@@ -251,17 +272,78 @@ class SetupScriptTests(unittest.TestCase):
                               env=sandbox_env(self.tmp), timeout=60)
         self.assertEqual(proc.returncode, 2)
 
-    def test_tools_only_run_installs_nothing_when_everything_is_present(self):
-        bin_dir = self.tmp / "bin"
-        log = self.tmp / "calls.log"
-        for tool in ("plink2", "nextflow", "bgzip", "tabix"):
-            write_stub(bin_dir, tool, f'echo "{tool} $*" >> "{log}"\n')
-        write_stub(bin_dir, "bcftools", 'if [[ "$1 $2" == "plugin -l" ]]; then echo liftover; fi\n')
-        proc = subprocess.run([BASH, str(self.repo / "src" / "source.sh"), "--tools-only"], capture_output=True, text=True,
-                              env=sandbox_env(self.tmp, bin_dir), timeout=120)
+    def install_stubs(self):
+        """A stub micromamba that records its calls and creates an environment with stub tools (bcftools lists the
+        liftover plugin, so nothing is built)."""
+        log = self.tmp / "mamba.log"
+        write_stub(self.repo / ".tools" / "bin", "micromamba", f'''echo "micromamba $*" >> "{log}"
+prefix=""; while [[ $# -gt 0 ]]; do [[ "$1" == "-p" ]] && prefix="$2"; shift; done
+mkdir -p "$prefix/conda-meta" "$prefix/bin" "$prefix/libexec/bcftools"
+for tool in nextflow plink2 python3 bgzip tabix; do printf '#!/usr/bin/env bash\\nexit 0\\n' > "$prefix/bin/$tool"; chmod +x "$prefix/bin/$tool"; done
+printf '#!/usr/bin/env bash\\n[[ "$1 $2" == "plugin -l" ]] && echo liftover\\nexit 0\\n' > "$prefix/bin/bcftools"; chmod +x "$prefix/bin/bcftools"
+''')
+        return log
+
+    def tools_only(self, *extra_args, bin_dirs=()):
+        return subprocess.run([BASH, str(self.repo / "src" / "source.sh"), "--tools-only", *extra_args], capture_output=True,
+                              text=True, env=sandbox_env(self.tmp, *bin_dirs, GWAS_DATA_HOME=str(self.tmp / "data")), timeout=120)
+
+    def test_tools_are_installed_into_1_environment_from_environment_yml(self):
+        log = self.install_stubs()
+        proc = self.tools_only()
         self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
         self.assertNotIn("BLOCKED", proc.stderr)
-        self.assertIn("python packages: already available", proc.stdout)
+        env = self.repo / ".tools" / "env"
+        calls = log.read_text(encoding="utf-8")
+        self.assertIn(f"create -y -q -p {env} -f {self.repo / 'environment.yml'}", calls)
+        settings = self.settings()
+        self.assertEqual((settings["GWAS_ENV"], settings["NEXTFLOW"], settings["PLINK2"], settings["GWAS_BCFTOOLS"],
+                          settings["BCFTOOLS_PLUGINS"]),
+                         (str(env), str(env / "bin" / "nextflow"), str(env / "bin" / "plink2"), str(env / "bin" / "bcftools"),
+                          str(env / "libexec" / "bcftools")))
+        self.assertIn("bcftools +liftover: found", proc.stdout)
+
+    def test_an_unchanged_environment_is_not_reinstalled_and_a_changed_one_is_updated(self):
+        log = self.install_stubs()
+        self.assertEqual(self.tools_only().returncode, 0)
+        log.write_text("", encoding="utf-8")
+        again = self.tools_only()
+        self.assertEqual(again.returncode, 0, again.stdout + again.stderr)
+        self.assertIn("tool environment: up to date", again.stdout)
+        self.assertEqual(log.read_text(encoding="utf-8"), "")
+        with open(self.repo / "environment.yml", "a", encoding="utf-8") as handle:
+            handle.write("  - tabulate\n")
+        changed = self.tools_only()
+        self.assertEqual(changed.returncode, 0, changed.stdout + changed.stderr)
+        self.assertIn("micromamba install -y -q -p", log.read_text(encoding="utf-8"))
+
+    def test_a_tool_the_user_set_in_dotenv_is_kept(self):
+        self.install_stubs()
+        mine = write_stub(self.tmp / "mine", "nextflow", "exit 0\n")
+        with open(self.repo / ".env", "a", encoding="utf-8") as handle:
+            handle.write(f"NEXTFLOW={mine}\n")
+        proc = self.tools_only()
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertEqual(self.settings()["NEXTFLOW"], str(mine))
+        self.assertIn(f"NEXTFLOW: keeping {mine}", proc.stdout)
+
+    def test_the_container_route_pulls_the_image_and_builds_nothing_on_the_host(self):
+        self.install_stubs()
+        bin_dir = self.tmp / "bin"
+        pulls = self.tmp / "apptainer.log"
+        write_stub(bin_dir, "apptainer", f'echo "apptainer $*" >> "{pulls}"; [[ "$1" == pull ]] && touch "$3"; exit 0\n')
+        proc = self.tools_only("--container", "apptainer", bin_dirs=(bin_dir,))
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        sif = self.repo / ".tools" / "gwasprocessing.sif"
+        self.assertIn(f"apptainer pull --force {sif} docker://ghcr.io/mattlee821/gwasprocessing:latest", pulls.read_text(encoding="utf-8"))
+        settings = self.settings()
+        self.assertEqual((settings["GWAS_CONTAINER"], settings["GWAS_CONTAINER_IMAGE"]), ("apptainer", str(sif)))
+        self.assertNotIn("GWAS_BCFTOOLS", settings)
+        self.assertNotIn("bcftools", proc.stdout)
+
+    def test_an_unknown_container_runtime_is_rejected(self):
+        proc = self.tools_only("--container", "podman")
+        self.assertEqual(proc.returncode, 2)
 
 
 class ReferenceDownloadScriptTests(unittest.TestCase):

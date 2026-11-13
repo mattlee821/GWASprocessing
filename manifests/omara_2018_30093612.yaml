@@ -1,0 +1,68 @@
+# Study YAML for O'Mara et al. 2018 endometrial cancer (GCST006464, ebi-a-GCST006464), used by the endometrial cancer rows of
+# manifests/test.tsv. A study YAML is optional: name it in a manifest row's study_yaml column, as a path relative to the
+# repository root or to manifests/. Every key is optional; the active keys below are the ones this study needs, and the
+# commented keys show the others with an example value.
+
+description: O'Mara et al. 2018 endometrial cancer, the benchmark case-control GWAS
+
+# Case-control study: written to ##SAMPLE as StudyType, TotalCases and TotalControls (totals from the GWAS Catalog and
+# OpenGWAS metadata). For a continuous trait use study_type: continuous and sample_size instead.
+study_type: casecontrol
+ncase: 12906
+ncontrol: 108979
+# sample_size: 121885
+
+# Column names. Usually detected automatically from built-in aliases (this file's names are recognised); name them here
+# when a file uses names the pipeline does not recognise. Fields: SNP (rsID), SNPID (other identifier), CHR, POS,
+# POS19 or POS38 (position in a known build), EA, OA, REF, ALT, EAF, BETA, OR, CI_LOWER, CI_UPPER, SE, P, LOG10P, N,
+# NCASE, IMPINFO.
+# columns:
+#   SNP: variant_id
+#   CHR: chromosome
+#   POS: base_pair_location
+#   EA: effect_allele
+#   OA: other_allele
+#   EAF: effect_allele_frequency
+#   BETA: beta
+#   SE: standard_error
+#   P: p_value
+#   IMPINFO: INFO
+
+# Genome build of the positions: used only when it cannot be detected from the data (hg19 or hg38).
+# input_build: hg19
+
+# Field separator, when it is not tab, comma or whitespace.
+# delimiter: "\t"
+
+# Reference population for allele frequencies, when the manifest ancestry does not describe the frequency column.
+# reference_population: EUR
+
+# Window around 0.5 within which a palindromic SNP's strand is not inferred (default 0.08).
+# palindromic_tolerance: 0.08
+
+# GWAS Catalog sources: use the harmonised file instead of the raw file.
+# gwas_catalog_file: harmonised
+
+# Source columns written to the VCF as INFO fields.
+# extras:
+#   - INFO
+
+# Fixes applied while reading. uppercase_alleles and strip_hash_header are on by default; set them false to turn them off.
+# transforms:
+#   uppercase_alleles: true        # read lower-case alleles as upper case
+#   strip_hash_header: true        # read a header line that starts with #
+#   derive_oa_from_ref_alt: true   # plink files with REF, ALT and A1 but no other-allele column
+
+# Add columns from another file (for example an rsID map), matched on a key column.
+# joins:
+#   - file: "${GWAS_WORK_ROOT}/omara_2018_30093612/docs/rsid_map.tsv"
+#     on: variant_id
+#     how: left
+
+# Remove rows listed in another file.
+# exclude:
+#   file: "${GWAS_WORK_ROOT}/omara_2018_30093612/docs/excluded.txt"
+#   key: variant_id
+
+# Multi-sample GWAS-VCF: the sample (GWAS) to read.
+# sample: ebi-a-GCST006464
