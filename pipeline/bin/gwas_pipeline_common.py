@@ -14,7 +14,6 @@ import os
 import re
 import shutil
 import ssl
-import subprocess
 import sys
 import tempfile
 import time
@@ -179,12 +178,6 @@ def infer_source_type(location: str) -> str:
         return "gwas_catalog"
     if "opengwas.io/datasets/" in lower or "gwas.mrcieu.ac.uk/datasets/" in lower:
         return "opengwas"
-    if re.fullmatch(r"syn\d+", loc, flags=re.I):
-        return "synapse"
-    if lower.startswith("s3://"):
-        return "s3"
-    if lower.startswith("gs://"):
-        return "gs"
     if lower.startswith(("http://", "https://", "ftp://")):
         return "direct_url"
     if re.fullmatch(OPENGWAS_ID_PATTERN, loc) and not Path(loc).exists():
@@ -236,12 +229,9 @@ def output_id_from_row(row: dict[str, str], source_type: str) -> str:
         "opengwas": "openGWAS",
         "direct_url": "directURL",
         "local": "local",
-        "synapse": "synapse",
-        "s3": "s3",
-        "gs": "gs",
     }.get(source_type, source_type)
     unique_id = safe_path_component(source_id)
-    if source_type not in {"gwas_catalog", "opengwas", "synapse"}:
+    if source_type not in {"gwas_catalog", "opengwas"}:
         unique_id = f"{unique_id}_{short_hash(row['GWAS_location'], 8)}"
     return f"{prefix}_{unique_id}"
 
@@ -535,26 +525,6 @@ def sanitize_filename(filename: str) -> str:
     filename = Path(filename).name
     filename = re.sub(r"[^A-Za-z0-9._+-]+", "_", filename)
     return filename or "gwas"
-
-
-def shell_copy_or_download(location: str, out_dir: str | Path) -> Path:
-    out_dir = ensure_dir(out_dir)
-    source_type = infer_source_type(location)
-    if source_type == "local":
-        src = Path(location.replace("file://", ""))
-        if not src.exists():
-            raise FileNotFoundError(f"Local GWAS file not found: {src}")
-        dest = out_dir / sanitize_filename(src.name)
-        if not dest.exists():
-            shutil.copy2(src, dest)
-        return dest
-    if source_type in {"direct_url", "gwas_catalog", "opengwas"}:
-        return download_url(location, out_dir)
-    if source_type in {"s3", "gs"}:
-        cmd = ["aws", "s3", "cp", location, str(out_dir)] if source_type == "s3" else ["gsutil", "cp", location, str(out_dir)]
-        subprocess.run(cmd, check=True)
-        return out_dir / Path(urllib.parse.urlparse(location).path).name
-    raise ValueError(f"Unsupported generic source type: {source_type}")
 
 
 def pick_existing_column(columns: Iterable[str], aliases: list[str]) -> str | None:

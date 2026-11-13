@@ -22,9 +22,6 @@ if [[ -n "${GWAS_CONTAINER:-}" && -z "${GWAS_IN_CONTAINER:-}" ]]; then
   exit
 fi
 
-if [[ -n "${GWAS_VENV:-}" && -x "${GWAS_VENV}/bin/python3" ]]; then
-  export PATH="${GWAS_VENV}/bin:${PATH}"
-fi
 cd "${ROOT_DIR}/pipeline/tests"
 echo "Running the GWASprocessing test suite with $(command -v python3)"
 names=()

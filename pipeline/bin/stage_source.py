@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import argparse
 import shutil
-import subprocess
-import urllib.parse
 from pathlib import Path
 
 from download_gwas_catalog import download_gwas_catalog
@@ -44,15 +42,6 @@ def copy_local(location: str, raw_dir: Path) -> Path:
         shutil.copy2(src, tmp)
         tmp.replace(dest)
     return dest
-
-
-def stage_cloud(location: str, raw_dir: Path, source_type: str) -> Path:
-    command = ["aws", "s3", "cp", location, str(raw_dir)] if source_type == "s3" else ["gsutil", "cp", location, str(raw_dir)]
-    subprocess.run(command, check=True)
-    path = raw_dir / Path(urllib.parse.urlparse(location).path).name
-    if not path.exists():
-        raise FileNotFoundError(f"{command[0]} reported success but {path} does not exist")
-    return path
 
 
 def main() -> None:
@@ -87,8 +76,6 @@ def main() -> None:
         raw_path = download_url(location, raw_dir)
     elif source_type == "local":
         raw_path = copy_local(location, raw_dir)
-    elif source_type in {"s3", "gs"}:
-        raw_path = stage_cloud(location, raw_dir, source_type)
     else:
         raise config_error(f"Unsupported source_type '{source_type}' for {location}")
 

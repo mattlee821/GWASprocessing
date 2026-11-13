@@ -13,9 +13,6 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "${ROOT_DIR}/src/lib/env.sh"
 load_settings "${ROOT_DIR}"
 activate_tools "${ROOT_DIR}"
-if [[ -n "${GWAS_VENV:-}" && -x "${GWAS_VENV}/bin/python3" ]]; then
-  export PATH="${GWAS_VENV}/bin:${PATH}"
-fi
 
 FORCE=()
 case "${1:-}" in

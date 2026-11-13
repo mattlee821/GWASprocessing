@@ -22,16 +22,11 @@ load_env_defaults() {
 }
 
 # load_settings ROOT: load the settings for a checkout from ROOT/.env (untracked; src/source.sh creates it from the
-# tracked .env.example). The template itself is never read: its values are placeholders. A checkout that still has
-# only the old server.env is read from that, with a warning. Without either, the scripts' built-in defaults and the
+# tracked .env.example). The template itself is never read: its values are placeholders. Without .env, the scripts' built-in defaults and the
 # environment apply, and a note says how to create .env.
 load_settings() {
   if [[ -f "$1/.env" ]]; then
     load_env_defaults "$1/.env"
-  elif [[ -f "$1/server.env" ]]; then
-    echo "Warning: reading settings from server.env, the old name. Run 'bash src/source.sh --env-only' to move them" \
-         "into .env." >&2
-    load_env_defaults "$1/server.env"
   else
     echo "Note: no .env in $1. Run 'bash src/source.sh --env-only' to create it from .env.example; using the" \
          "environment and built-in defaults." >&2

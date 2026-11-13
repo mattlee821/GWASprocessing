@@ -46,7 +46,7 @@ from gwas_pipeline_common import (
 
 DERIVED_COLUMNS = ["study_id", "output_id", "row_hash", "raw_dir", "standardise_dir", "output_prefix", "settings_hash"]
 RUN_COLUMNS = MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS + DERIVED_COLUMNS
-SUPPORTED_SOURCES = {"gwas_catalog", "opengwas", "direct_url", "local", "s3", "gs"}
+SUPPORTED_SOURCES = {"gwas_catalog", "opengwas", "direct_url", "local"}
 SEX_VALUES = {"combined", "male", "female"}
 FORMAT_VALUES = {"table", "vcf"}
 
@@ -66,9 +66,7 @@ def validate_row(row: dict[str, str], line: int, source_type: str) -> list[str]:
     if resolve_ancestry(row.get("ancestry")) is None:
         errors.append(f"row {line}: ancestry '{row.get('ancestry', '')}' is not a 1000 Genomes super-population "
                       "(ALL, AFR, AMR, EAS, EUR, SAS) or an unambiguous synonym")
-    if source_type == "synapse":
-        errors.append(f"row {line}: Synapse sources ({row['GWAS_location']}) are not supported yet; download the file and use a local path")
-    elif source_type not in SUPPORTED_SOURCES:
+    if source_type not in SUPPORTED_SOURCES:
         errors.append(f"row {line}: unsupported source_type '{source_type}'")
     if source_type == "opengwas" and not opengwas_dataset_id(row["GWAS_location"]):
         errors.append(f"row {line}: no OpenGWAS dataset ID found in {row['GWAS_location']}")

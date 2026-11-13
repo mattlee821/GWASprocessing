@@ -65,13 +65,13 @@ OPENGWAS_JWT=your-token
 
 #### 6. Run the tests
 
-About 4 minutes; they must all pass. On the container route they run inside the image, so they test the image's tools.
+About 4 minutes; they must all pass. There is 1 test for each of the 12 [pipeline steps](#pipeline-steps) (`pipeline/tests/test_step01_stage.py` to `test_step12_write_report.py`) and 1 each for the manifest, the run, the manifest page and setup. Each test checks every rule this README states for its component, and a failure names the rule. On the container route the tests run inside the image, so they test the image's tools.
 
 ```bash
 bash src/test.sh
 ```
 
-To run 1 file or test: `bash src/test.sh test_registry`.
+To run 1 test: `bash src/test.sh test_step08_palindromes`.
 
 #### 7. Run the benchmark
 
@@ -97,12 +97,12 @@ https://opengwas.io/datasets/ebi-a-GCST006464	endometrial cancer	EUR	female	OMar
 
 | Column | Required | Values | Meaning |
 |---|---|---|---|
-| `GWAS_location` | yes | a GWAS Catalog study URL or accession (`GCST002783`); an OpenGWAS dataset URL or ID (`ebi-a-GCST002783`); a URL (`https://`, `ftp://`, `s3://`, `gs://`); a local file path | where the summary statistics are |
+| `GWAS_location` | yes | a GWAS Catalog study URL or accession (`GCST002783`); an OpenGWAS dataset URL or ID (`ebi-a-GCST002783`); a URL (`https://`, `ftp://`); a local file path | where the summary statistics are |
 | `phenotype` | yes | text | the trait, written to the VCF header |
 | `ancestry` | yes | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL` (`European`, `East Asian` and similar labels are accepted; `ALL` for a multi-ancestry GWAS) | the ancestry of the GWAS sample, written to the VCF header; it also chooses the 1000 Genomes population unless `population` is set |
 | `sex` | no | `combined`, `male` or `female` | the sex of the GWAS sample, written to the VCF header (`NA` when empty) |
 | `author`, `year`, `PMID` | yes | first author's surname, publication year, PubMed ID | written to the VCF header, and together name the study folder (`locke_2015_25673413`) |
-| `source_type` | no | `gwas_catalog`, `opengwas`, `direct_url`, `local`, `s3`, `gs` | how the file is fetched. It is worked out from `GWAS_location`; set it only when that goes wrong, for example a local file whose name looks like an OpenGWAS ID |
+| `source_type` | no | `gwas_catalog`, `opengwas`, `direct_url`, `local` | how the file is fetched. It is worked out from `GWAS_location`; set it only when that goes wrong, for example a local file whose name looks like an OpenGWAS ID |
 | `input_build` | no | `hg19` (GRCh37) or `hg38` (GRCh38) | the genome build of the file's positions. The build is detected from the data; this value is used only when detection fails, and a value that contradicts the data is reported and ignored |
 | `population` | no | `AFR`, `AMR`, `EAS`, `EUR`, `SAS` or `ALL` | the 1000 Genomes population whose allele frequencies are compared with the study's, to resolve the strand of palindromic SNPs, fill missing frequencies and check the effect allele. It defaults to `ancestry`; set it when the file's frequency column comes from another population. Locke is an all-ancestry meta-analysis (`ancestry` `ALL`) whose frequencies come from HapMap CEU, so its `population` is `EUR` |
 | `delimiter` | no | `tab`, `comma`, `space` (any run of spaces or tabs), or the character itself | the column separator of a table. It is detected from the header when empty; leave it empty for a VCF |
@@ -168,7 +168,7 @@ df <- data.frame(CHR = as.character(stats$seqnames), POS = stats$start, SNP = st
 
 ### 1. Stage
 
-GWAS Catalog sources are downloaded as the raw author-submitted file, and the URL of the Catalog's harmonised file is recorded. When the raw file cannot be standardised (columns that cannot be mapped, a build that cannot be detected), the harmonised file is used instead and the fallback is recorded; `gwas_catalog_file: harmonised` in a study YAML chooses it from the start. The raw file is preferred because the harmonised file is a processed copy: it removes every variant without an rsID, orients palindromic SNPs by 1 file-wide strand assumption, converts −log10 P to P (which underflows) and keeps duplicates. OpenGWAS sources use the authenticated API, and their GWAS-VCF goes through the same steps as any table, so it is re-harmonised to GRCh38. URLs are downloaded with retries, `s3://` and `gs://` with `aws` and `gsutil`, and local files are copied and copied again when they change. Downloads are checked by checksum or gzip integrity.
+GWAS Catalog sources are downloaded as the raw author-submitted file, and the URL of the Catalog's harmonised file is recorded. When the raw file cannot be standardised (columns that cannot be mapped, a build that cannot be detected), the harmonised file is used instead and the fallback is recorded; `gwas_catalog_file: harmonised` in a study YAML chooses it from the start. The raw file is preferred because the harmonised file is a processed copy: it removes every variant without an rsID, orients palindromic SNPs by 1 file-wide strand assumption, converts −log10 P to P (which underflows) and keeps duplicates. OpenGWAS sources use the authenticated API, and their GWAS-VCF goes through the same steps as any table, so it is re-harmonised to GRCh38. URLs are downloaded with retries, and local files are copied and copied again when they change. Downloads are checked by checksum or gzip integrity.
 
 ### 2. Read
 

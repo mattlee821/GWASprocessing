@@ -36,7 +36,6 @@ for _var in ("http_proxy", "https_proxy", "ftp_proxy", "all_proxy", "HTTP_PROXY"
 os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ.setdefault("NXF_OFFLINE", "true")
 
-LOOKUP_COLUMNS = ["CHR", "SNP", "POS19", "A1", "A2", "AF1"]  # rows given to make_reference: A1 = ALT, A2 = REF
 
 # Example liftover: on chromosomes 1 and 2, GRCh38 = GRCh37 + 100 for positions 1..1,000,000.
 CHAIN_OFFSET = 100
@@ -342,8 +341,11 @@ class LocalHttpServer:
         import http.server
         import threading
 
-        handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(directory))
-        handler.log_message = lambda *args, **kwargs: None
+        class QuietHandler(http.server.SimpleHTTPRequestHandler):
+            def log_message(self, *args, **kwargs):
+                pass
+
+        handler = functools.partial(QuietHandler, directory=str(directory))
         self.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
 

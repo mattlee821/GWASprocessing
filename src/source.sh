@@ -47,12 +47,12 @@ set_env_var() {
 ENV_DEFAULT_PATHS=(GWAS_WORK_ROOT=GWAS GWAS_REFERENCE_ROOT=references GWAS_TEMP_ROOT=temp GWAS_LOG_ROOT=temp/logs
                    GWAS_NEXTFLOW_WORK=temp/nextflow_work GWAS_NEXTFLOW_LOG=temp/.nextflow.log)
 
-# ensure_env_file: create .env from .env.example when it is missing (moving the values of an old server.env into
-# it), then fill each path still a /WHERE/... placeholder or empty: from the environment when set there, otherwise
+# ensure_env_file: create .env from .env.example when it is missing, then fill each path still a /WHERE/...
+# placeholder or empty: from the environment when set there, otherwise
 # under the data home (GWAS_DATA_HOME; default the repository, or ~/GWASprocessing-data when the repository is in
 # a cloud-synced folder). Values already in .env are never changed.
 ensure_env_file() {
-  local template="${ROOT_DIR}/.env.example" old="${ROOT_DIR}/server.env" line key value home pair filled=() moved=0
+  local template="${ROOT_DIR}/.env.example" home pair filled=()
   if [[ ! -f "${ENV_FILE}" ]]; then
     if [[ ! -f "${template}" ]]; then
       echo "${template} not found: cannot create .env" >&2
@@ -60,18 +60,6 @@ ensure_env_file() {
     fi
     cp "${template}" "${ENV_FILE}"
     echo "Created .env from .env.example"
-    if [[ -f "${old}" ]]; then
-      while IFS= read -r line || [[ -n "${line}" ]]; do
-        [[ "${line}" =~ ^[[:space:]]*(#|$) ]] && continue
-        [[ "${line}" == *=* ]] || continue
-        key="${line%%=*}"; key="${key#export }"; key="${key//[[:space:]]/}"
-        [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
-        value="${line#*=}"; value="${value%\"}"; value="${value#\"}"; value="${value%\'}"; value="${value#\'}"
-        set_env_var "${key}" "${value}" >/dev/null
-        moved=$((moved + 1))
-      done < "${old}"
-      echo "Moved ${moved} settings from server.env into .env; server.env is no longer read and can be deleted"
-    fi
   fi
   home="${GWAS_DATA_HOME:-${ROOT_DIR}}"
   case "${home}" in

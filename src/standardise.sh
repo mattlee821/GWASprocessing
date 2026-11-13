@@ -58,7 +58,7 @@ Options:
 Environment (or .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
 GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_REPORT, GWAS_ROW_LIMIT,
 GWAS_ENV (tool environment from src/source.sh), GWAS_CONTAINER (apptainer or docker: run every step in the image),
-GWAS_CONTAINER_IMAGE, NEXTFLOW (path to the nextflow launcher), GWAS_VENV (older installs: Python virtual environment).
+GWAS_CONTAINER_IMAGE, NEXTFLOW (path to the nextflow launcher).
 USAGE
 }
 
@@ -164,16 +164,6 @@ if [[ -n "${GWAS_CONTAINER:-}" ]]; then
   esac
   export GWAS_CONTAINER_IMAGE="${GWAS_CONTAINER_IMAGE:-}" GWAS_TEMP_ROOT="${TEMP_ROOT}"
 fi
-# An older install's Python virtual environment (GWAS_VENV) still works, ahead of GWAS_ENV.
-if [[ -n "${GWAS_VENV:-}" ]]; then
-  VENV_DIR="$(resolve_path "${GWAS_VENV}")"
-  if [[ -x "${VENV_DIR}/bin/python3" ]]; then
-    export PATH="${VENV_DIR}/bin:${PATH}"
-  else
-    echo "Warning: GWAS_VENV=${GWAS_VENV} has no bin/python3; using python3 from PATH" >&2
-  fi
-fi
-
 if [[ -n "${NEXTFLOW:-}" ]]; then
   NEXTFLOW_BIN="${NEXTFLOW}"
 elif command -v nextflow >/dev/null 2>&1; then
