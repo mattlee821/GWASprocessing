@@ -65,11 +65,13 @@ OPENGWAS_JWT=your-token
 
 #### 6. Run the tests
 
-About 4 minutes; they must all pass.
+About 4 minutes; they must all pass. On the container route they run inside the image, so they test the image's tools.
 
 ```bash
 bash src/test.sh
 ```
+
+To run 1 file or test: `bash src/test.sh test_registry`.
 
 #### 7. Run the benchmark
 

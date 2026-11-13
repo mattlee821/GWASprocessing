@@ -93,3 +93,25 @@ fetch() {
   fi
   mv "${out}.part" "${out}"
 }
+
+# in_container CMD...: run a command inside the GWASprocessing image (GWAS_CONTAINER, GWAS_CONTAINER_IMAGE) with the
+# repository (ROOT_DIR) and reference folders mounted at the same paths, so .env and the scripts work unchanged.
+in_container() {
+  local folders=("${ROOT_DIR}") folder args=() resolved
+  for folder in "${GWAS_REFERENCE_ROOT:-references}" "${GWAS_REFERENCE_RAW_ROOT:-}"; do
+    [[ -n "${folder}" ]] || continue
+    resolved="${folder}"
+    [[ "${resolved}" == /* ]] || resolved="${ROOT_DIR}/${resolved}"
+    mkdir -p "${resolved}"
+    folders+=("${resolved}")
+  done
+  case "${GWAS_CONTAINER}" in
+    apptainer|singularity)
+      for folder in "${folders[@]}"; do args+=(--bind "${folder}"); done
+      "$(command -v apptainer || command -v singularity)" exec "${args[@]}" --pwd "${ROOT_DIR}" "${GWAS_CONTAINER_IMAGE}" "$@" ;;
+    docker)
+      for folder in "${folders[@]}"; do args+=(-v "${folder}:${folder}"); done
+      docker run --rm -u "$(id -u):$(id -g)" "${args[@]}" -w "${ROOT_DIR}" \
+        -e GWAS_REFERENCE_ROOT -e GWAS_REFERENCE_RAW_ROOT -e GWAS_REFERENCE_FORCE "${GWAS_CONTAINER_IMAGE}" "$@" ;;
+  esac
+}

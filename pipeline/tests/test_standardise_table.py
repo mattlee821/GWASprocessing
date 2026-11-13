@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from testlib import EXAMPLES, ROOT, example_reference, make_reference, needs_liftover, run_standardise, write_table
+from testlib import EXAMPLES, example_reference, make_reference, needs_liftover, run_standardise, write_table
 
 HEADER = ["CHR", "POS", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P", "N"]
 
@@ -46,7 +46,7 @@ class AdaptedBehaviourTests(unittest.TestCase):
 
     def test_plink_table_derives_other_allele_from_ref_and_alt(self):
         result = run_standardise(self.tmp, EXAMPLES / "tables/zhang_plink.tsv", example_reference(),
-                                 config_root=ROOT / "manifests", phenotype="protein", ancestry="EUR",
+                                 config_root=EXAMPLES / "study_yaml", phenotype="protein", ancestry="EUR",
                                  author="Zhang", year="2022", PMID="35501419", study_id="zhang_2022_35501419")
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertTrue(result.qc["derived_oa_from_ref_alt"])
