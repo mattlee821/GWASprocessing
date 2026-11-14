@@ -10,6 +10,7 @@ The row JSON comes from prepare_manifest.py, so manifest text never passes throu
 from __future__ import annotations
 
 import argparse
+import json
 import gzip
 import hashlib
 import re
@@ -45,6 +46,50 @@ def copy_local(location: str, raw_dir: Path) -> Path:
         shutil.copy2(src, tmp)
         tmp.replace(dest)
     return dest
+
+
+def combine_tar_table(archive: Path, raw_dir: Path, output_id: str) -> tuple[Path, dict]:
+    """The table of a protein delivered as a tar of per-chromosome files (UKB-PPP: 1 .gz per chromosome, each with a header).
+
+    The members are joined into `<raw_dir>/<output_id>.combined.txt.gz` with the header once (the first member's), and a
+    member whose header differs stops the row. The combined file is rebuilt only when the archive changed. The archive
+    stays where it is. Members are streamed, so nothing but the combined file is written."""
+    import gzip
+    import tarfile
+
+    dest = raw_dir / f"{sanitize_filename(output_id)}.combined.txt.gz"
+    stamp = {"archive": str(archive), "size": archive.stat().st_size, "mtime": int(archive.stat().st_mtime)}
+    marker = dest.with_name(dest.name + ".source.json")
+    if dest.exists() and marker.exists():
+        try:
+            if json.loads(marker.read_text(encoding="utf-8")).get("archive") == stamp:
+                return dest, {"tar": stamp, "combined": str(dest), "reused": True}
+        except ValueError:
+            pass
+    tmp = dest.with_name(dest.name + ".part")
+    members = 0
+    header = None
+    with tarfile.open(archive, "r:") as tar, gzip.open(tmp, "wb", compresslevel=1) as out:
+        for member in tar:
+            if not member.isfile() or member.name.rsplit("/", 1)[-1].startswith("."):
+                continue
+            handle = tar.extractfile(member)
+            stream = gzip.GzipFile(fileobj=handle) if member.name.endswith(".gz") else handle
+            first = stream.readline()
+            if header is None:
+                header = first
+                out.write(first)
+            elif first != header:
+                tmp.unlink(missing_ok=True)
+                raise data_error(f"{archive.name}: the header of {member.name} differs from the first file's")
+            shutil.copyfileobj(stream, out, 16 * 1024 * 1024)
+            members += 1
+    if members == 0:
+        tmp.unlink(missing_ok=True)
+        raise data_error(f"{archive} has no files")
+    tmp.replace(dest)
+    marker.write_text(json.dumps({"archive": stamp, "members": members}), encoding="utf-8")
+    return dest, {"tar": stamp, "combined": str(dest), "members": members}
 
 
 def md5_sidecar(path: Path) -> Path | None:
@@ -155,13 +200,18 @@ def main() -> None:
         if source.resolve().is_relative_to(study_raw):
             raw_path = source.resolve()
             metadata["in_place"] = True
-            try:
-                raw_dir.rmdir()  # nothing is staged, so the row's own raw folder stays empty
-            except OSError:
-                pass
+            if not source.name.endswith(".tar"):
+                try:
+                    raw_dir.rmdir()  # nothing is staged, so the row's own raw folder stays empty
+                except OSError:
+                    pass
         else:
             raw_path = copy_local(location, raw_dir)
-        if not metadata["md5"]["checked"]:
+        if raw_path.name.endswith(".tar"):
+            combined_dir = ensure_dir(row["raw_dir"])
+            raw_path, tar_info = combine_tar_table(raw_path, combined_dir, row["output_id"])
+            metadata.update(tar_info)
+        elif not metadata["md5"]["checked"]:
             metadata["gzip"] = verify_gzip(raw_path)
             if metadata["gzip"].get("checked") and not metadata["gzip"].get("ok"):
                 raise data_error(f"gzip integrity check failed for {source}: {metadata['gzip'].get('error', '')}")
