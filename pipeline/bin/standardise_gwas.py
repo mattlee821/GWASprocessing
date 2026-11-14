@@ -918,13 +918,13 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], fasta: Any, pa
     if "RS_MERGED" in out.columns:
         row_ids = row_ids + MERGED_RSID_ORDER_OFFSET * out["RS_MERGED"].fillna(False).to_numpy(dtype=bool)
     order = np.lexsort((row_ids, out["POS38"].to_numpy(dtype="float64"), gwas_vcf.chrom_ranks(out["CHR"])))
-    write_piece_lines(part, out.iloc[order], row_ids[order], low[order], high[order], action[order], extras, keys,
-                      settings["afs_label"])
+    ranks = write_piece_lines(part, out.iloc[order], row_ids[order], low[order], high[order], action[order], extras, keys,
+                              settings["afs_label"])
     lap("write_piece")
     decisions = {"cols": cols, "extras": extras, "build": build, "format_keys": keys,
                  "negate_log10p": bool(qc.get("p_value_source", {}).get("log10p_negated", False)),
                  "derive_oa": bool(qc.get("derived_oa_from_ref_alt", False))}
-    return {"qc": qc, "moments": moments, "decisions": decisions, "part": str(part), "timings": timings}
+    return {"qc": qc, "moments": moments, "decisions": decisions, "part": str(part), "ranks": ranks, "timings": timings}
 
 
 def harmonisation_action(pal: np.ndarray, action: np.ndarray, strand_changed: np.ndarray | None = None) -> np.ndarray:
@@ -945,52 +945,60 @@ def harmonisation_action(pal: np.ndarray, action: np.ndarray, strand_changed: np
     return np.where(pal != "", pal_words, words)
 
 
+def piece_rank_file(part: Path, rank: int) -> Path:
+    return part.with_name(f"{part.name}.r{rank:02d}")
+
+
 def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.ndarray, high: np.ndarray,
-                      action: np.ndarray, extras: list[str], keys: list[str], afs_label: str) -> None:
+                      action: np.ndarray, extras: list[str], keys: list[str], afs_label: str) -> list[int]:
     """One line per row: chromosome rank, POS38, input row, dedup allele pair, alignment action, LP, AF-filled flag,
-    AF-missing flag, ES, SS, VCF record.
+    AF-missing flag, ES, SS, VCF record. The lines of each chromosome rank go in their own file (`piece_rank_file`),
+    so the merge can take 1 chromosome at a time; the rows come sorted by rank. Returns the ranks written.
 
     The leading fields let `sort` restore genome order with input order as the tie-break; LP is kept at full
     precision for lambda GC. Rows that alignment will drop are kept so they still claim their dedup key."""
-    with open(part, "w", encoding="utf-8") as handle:
-        step = 500_000
-        for start in range(0, len(out), step):
-            piece = out.iloc[start:start + step]
-            sl = slice(start, start + step)
-            lines = np.array(gwas_vcf.table_body_lines(piece, extras, keys, afs_label), dtype=object)
-            rank = gwas_vcf.chrom_ranks(piece["CHR"]).astype(str).astype(object)
-            pos = piece["POS38"].to_numpy(dtype="float64").astype("int64").astype(str).astype(object)
-            lp = np.char.mod("%.17g", piece["LP"].to_numpy(dtype="float64")).astype(object)
-            eaf = piece["EAF"].to_numpy(dtype="float64")
-            filled = ((piece["EAF_SOURCE"].astype(str).to_numpy() == "reference") & np.isfinite(eaf)).astype(int).astype(str).astype(object)
-            no_af = (~np.isfinite(eaf)).astype(int).astype(str).astype(object)
-            es = np.char.mod("%.17g", piece["BETA"].to_numpy(dtype="float64")).astype(object)
-            ss = np.char.mod("%.17g", numeric_series(piece["N"]).to_numpy(dtype="float64") if "N" in piece.columns
-                             else np.full(len(piece), np.nan)).astype(object)
-            keys_ = (rank + "\t" + pos + "\t" + rows[sl].astype(str).astype(object) + "\t" + low[sl].astype(object)
-                     + "\t" + high[sl].astype(object) + "\t" + action[sl].astype(object) + "\t" + lp + "\t" + filled
-                     + "\t" + no_af + "\t" + es + "\t" + ss + "\t" + lines)
-            handle.write("\n".join(keys_.tolist()) + "\n")
+    written_ranks: list[int] = []
+    step = 500_000
+    for start in range(0, len(out), step):
+        piece = out.iloc[start:start + step]
+        sl = slice(start, start + step)
+        lines = np.array(gwas_vcf.table_body_lines(piece, extras, keys, afs_label), dtype=object)
+        rank_int = gwas_vcf.chrom_ranks(piece["CHR"])
+        rank = rank_int.astype(str).astype(object)
+        pos = piece["POS38"].to_numpy(dtype="float64").astype("int64").astype(str).astype(object)
+        lp = np.char.mod("%.17g", piece["LP"].to_numpy(dtype="float64")).astype(object)
+        eaf = piece["EAF"].to_numpy(dtype="float64")
+        filled = ((piece["EAF_SOURCE"].astype(str).to_numpy() == "reference") & np.isfinite(eaf)).astype(int).astype(str).astype(object)
+        no_af = (~np.isfinite(eaf)).astype(int).astype(str).astype(object)
+        es = np.char.mod("%.17g", piece["BETA"].to_numpy(dtype="float64")).astype(object)
+        ss = np.char.mod("%.17g", numeric_series(piece["N"]).to_numpy(dtype="float64") if "N" in piece.columns
+                         else np.full(len(piece), np.nan)).astype(object)
+        keys_ = (rank + "\t" + pos + "\t" + rows[sl].astype(str).astype(object) + "\t" + low[sl].astype(object)
+                 + "\t" + high[sl].astype(object) + "\t" + action[sl].astype(object) + "\t" + lp + "\t" + filled
+                 + "\t" + no_af + "\t" + es + "\t" + ss + "\t" + lines)
+        edges = [0, *(np.flatnonzero(np.diff(rank_int)) + 1).tolist(), len(rank_int)]
+        for first, last in zip(edges[:-1], edges[1:]):
+            number = int(rank_int[first])
+            with open(piece_rank_file(part, number), "a", encoding="utf-8") as handle:
+                handle.write("\n".join(keys_[first:last].tolist()) + "\n")
+            if number not in written_ranks:
+                written_ranks.append(number)
+    return written_ranks
 
 
-def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
-                 decisions: dict[str, Any], fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None,
-                 reference_root: str = "", population: str = "", threads: int = 1) -> None:
-    """Sort all pieces by position, drop alignment failures, remove duplicates, then write the header (whose
-    ##SAMPLE counts are final only now) in front of the body, bgzip and index."""
-    timings = {} if timings is None else timings
-    started = time.perf_counter()
-    body = work / "body.vcf"
+def merge_rank(rank: int, files: list[str], body: str, reference_root: str, population: str) -> dict[str, Any]:
+    """Merge the piece files of 1 chromosome rank in genome order, drop alignment failures, remove duplicates, set the
+    rsIDs from dbSNP and write the records to `body`. Returns the counts and statistics of the rank. Different ranks
+    never share a (chromosome, position), so each rank is independent of the others."""
     actions: dict[str, int] = {}
     lp_values = array("d")
-    duplicates = written = filled_written = 0
+    duplicates = written = filled_written = matched = 0
     stats = {"af_missing": 0, "effect_sum": 0.0, "effect_abs_sum": 0.0, "effect_n": 0, "max_ss": -math.inf}
     current: tuple[str, str] | None = None
     seen: set[tuple[str, str]] = set()
-    command = ["sort", "-m", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(work), *map(str, parts)]
+    command = ["sort", "-m", "-t", "\t", "-k1,1n", "-k2,2n", "-k3,3n", "-T", str(Path(body).parent), *files]
     dbsnp = grch38_references(reference_root, population)[0] if reference_root else None
     batch: list[str] = []
-    matched = 0
 
     def flush(handle) -> None:
         """Write a batch of records, with ID and FORMAT/ID set to the dbSNP rsID matching (CHROM, POS, REF, ALT)."""
@@ -1010,12 +1018,12 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     with open(body, "w", encoding="utf-8") as out, \
             subprocess.Popen(command, stdout=subprocess.PIPE, text=True, encoding="utf-8", env=env) as proc:
         for line in proc.stdout:
-            rank, pos, _row, low, high, action, lp, filled, no_af, es, ss, record_line = line.split("\t", 11)
+            line_rank, pos, _row, low, high, action, lp, filled, no_af, es, ss, record_line = line.split("\t", 11)
             actions[action] = actions.get(action, 0) + 1
             if action in alleles.REMOVED_ACTIONS:  # alignment failures go first, so they never displace a usable copy
                 continue
-            if (rank, pos) != current:
-                current, seen = (rank, pos), set()
+            if (line_rank, pos) != current:
+                current, seen = (line_rank, pos), set()
             if (low, high) in seen:
                 duplicates += 1
                 continue
@@ -1036,7 +1044,57 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
                 stats["max_ss"] = max(stats["max_ss"], size)
         flush(out)
     if proc.returncode != 0:
-        raise RuntimeError(f"sort exited {proc.returncode} while merging {len(parts)} table pieces")
+        raise RuntimeError(f"sort exited {proc.returncode} while merging {len(files)} piece files of chromosome rank {rank}")
+    for name in files:
+        Path(name).unlink(missing_ok=True)
+    return {"rank": rank, "actions": actions, "lp": lp_values.tobytes(), "duplicates": duplicates, "written": written,
+            "filled_written": filled_written, "matched": matched, "stats": stats}
+
+
+def merge_pieces(parts: list[Path], ranks: list[list[int]], work: Path, vcf_path: Path, record: dict[str, Any],
+                 config: dict[str, Any], decisions: dict[str, Any], fasta: Any, qc: dict[str, Any],
+                 timings: dict[str, float] | None = None, reference_root: str = "", population: str = "",
+                 threads: int = 1) -> None:
+    """Merge the pieces in genome order 1 chromosome rank at a time (`threads` ranks at once), drop alignment
+    failures, remove duplicates, then write the header (whose ##SAMPLE counts are final only now) in front of the
+    bodies of the ranks, bgzip and index. The result is the same for any number of threads."""
+    timings = {} if timings is None else timings
+    started = time.perf_counter()
+    all_ranks = sorted({rank for per_piece in ranks for rank in per_piece})
+    jobs = [(rank, [str(piece_rank_file(part, rank)) for part, per_piece in zip(parts, ranks) if rank in per_piece],
+             str(work / f"body.r{rank:02d}.vcf"), reference_root, population) for rank in all_ranks]
+    # the biggest chromosomes first, so the pool is not left waiting on one of them at the end
+    order = sorted(range(len(jobs)), key=lambda i: -sum(Path(f).stat().st_size for f in jobs[i][1]))
+    outcomes: dict[int, dict[str, Any]] = {}
+    if threads <= 1 or len(jobs) <= 1:
+        for i in order:
+            outcomes[jobs[i][0]] = merge_rank(*jobs[i])
+    else:
+        context = multiprocessing.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=min(threads, len(jobs)), mp_context=context) as pool:
+            futures = {pool.submit(merge_rank, *jobs[i]): jobs[i][0] for i in order}
+            for future in futures:
+                outcomes[futures[future]] = future.result()
+    bodies = [Path(job[2]) for job in jobs]
+    results = [outcomes[rank] for rank in all_ranks]  # in genome order, so the sums below add in the same order as before
+    actions: dict[str, int] = {}
+    for result in results:
+        for name, count in result["actions"].items():
+            actions[name] = actions.get(name, 0) + count
+    duplicates = sum(r["duplicates"] for r in results)
+    written = sum(r["written"] for r in results)
+    filled_written = sum(r["filled_written"] for r in results)
+    matched = sum(r["matched"] for r in results)
+    stats = {"af_missing": 0, "effect_sum": 0.0, "effect_abs_sum": 0.0, "effect_n": 0, "max_ss": -math.inf}
+    for result in results:
+        part = result["stats"]
+        for key in ("af_missing", "effect_sum", "effect_abs_sum", "effect_n"):
+            stats[key] += part[key]
+        stats["max_ss"] = max(stats["max_ss"], part["max_ss"])
+    lp_values = array("d")
+    for result in results:
+        lp_values.frombytes(result["lp"])
+    dbsnp = grch38_references(reference_root, population)[0] if reference_root else None
     if dbsnp is not None:
         qc["rsid_dbsnp"] = {"matched": matched, "unmatched": written - matched, "source": dbsnp.label}
     qc["duplicates_removed"] = duplicates
@@ -1066,7 +1124,7 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
                                                        multiallelic=bool((qc.get("multiallelic") or {}).get("other_allele_from_id")))) + "\n", encoding="utf-8")
     timings["sort_merge_deduplicate"] = time.perf_counter() - started
     started = time.perf_counter()
-    gwas_vcf.bgzip_and_index([header, body], vcf_path, threads=threads)
+    gwas_vcf.bgzip_and_index([header, *bodies], vcf_path, threads=threads)
     timings["compress_and_index"] = time.perf_counter() - started
 
 
@@ -1306,7 +1364,7 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
         qc["table_pieces"] = {"pieces": len(results), "rows_per_piece": chunk_rows or "all", "workers": workers}
         moments = merge_piece_qc(qc, results, record)
         check_af_concordance(moments, qc)
-        merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall,
+        merge_pieces([Path(r["part"]) for r in results], [r["ranks"] for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall,
                      reference_root, population, threads=workers)
         per_step: dict[str, float] = {}
         for result in results:
