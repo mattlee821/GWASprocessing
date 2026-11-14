@@ -21,7 +21,7 @@ from testlib import EXAMPLES, make_reference, run_script
 import gwas_pipeline_common as common
 
 REQUIRED = ["GWAS_location", "phenotype", "ancestry", "author", "year", "PMID"]
-OPTIONAL = ["sex", "source_type", "input_build", "population", "delimiter", "format", "study_yaml"]
+OPTIONAL = ["sex", "source_type", "input_build", "population", "delimiter", "format", "study_yaml", "output_name"]
 HEADER = "\t".join(REQUIRED) + "\n"
 FULL_HEADER = "\t".join(REQUIRED[:3] + ["sex"] + REQUIRED[3:] + OPTIONAL[1:]) + "\n"
 OUTPUT_FILES = {"standard_vcf": "standardised.gwas.vcf.gz", "standard_index": "standardised.gwas.vcf.gz.tbi",
@@ -176,11 +176,12 @@ class ManifestTest(unittest.TestCase):
         with self.subTest("every optional column is preserved in the run manifest and the row JSON"):
             c = case()
             (c.config_root / "custom.yaml").write_text("description: custom\n", encoding="utf-8")
-            c.manifest(f"{RAW}\tBMI\tall\tfemale\tLocke\t2015\t25673413\tlocal\thg19\tEUR\tspace\ttable\tcustom.yaml\n",
+            c.manifest(f"{RAW}\tBMI\tall\tfemale\tLocke\t2015\t25673413\tlocal\thg19\tEUR\tspace\ttable\tcustom.yaml\tP12345_10-1\n",
                        FULL_HEADER)
             c.prepare()
             expected = {"sex": "female", "source_type": "local", "input_build": "hg19", "population": "EUR",
-                        "delimiter": "space", "format": "table", "study_yaml": "custom.yaml"}
+                        "delimiter": "space", "format": "table", "study_yaml": "custom.yaml",
+                        "output_name": "P12345_10-1"}
             self.assertEqual({col: c.rows()[0][col] for col in OPTIONAL}, expected)
             self.assertEqual({col: c.row_jsons()[0][col] for col in OPTIONAL}, expected)
 
@@ -188,7 +189,8 @@ class ManifestTest(unittest.TestCase):
             plain = {"GWAS_location": str(RAW), "phenotype": "BMI", "ancestry": "EUR", "author": "Locke", "year": "2015",
                      "PMID": "25673413", "study_id": "locke_2015_25673413"}
             for col, value in {"sex": "male", "source_type": "local", "input_build": "hg38", "population": "AFR",
-                               "delimiter": "comma", "format": "vcf", "study_yaml": "x.yaml"}.items():
+                               "delimiter": "comma", "format": "vcf", "study_yaml": "x.yaml",
+                               "output_name": "P12345_10-1"}.items():
                 changed = {**plain, col: value}
                 self.assertNotEqual(common.row_hash(plain), common.row_hash(changed), col)
                 self.assertNotEqual(common.settings_fingerprint(plain, {}, reference),
@@ -235,6 +237,32 @@ class ManifestTest(unittest.TestCase):
             self.assertIn("ancestry 'unknown'", invalid[0]["errors"][0])
             self.assertEqual(sorted(r["study_id"] for r in c.rows()), ["locke_2015_25673413", "pulit_2018_30239722"],
                              "rejected rows are in the run manifest, so the run lists them as failed")
+
+        with self.subTest("output_name names the output folder and every output file"):
+            c = case()
+            named = HEADER.rstrip("\n") + "\toutput_name\n"
+            c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tP01011-P07288_4153-11\n", named)
+            c.prepare()
+            row = c.rows()[0]
+            self.assertEqual(row["output_id"], "P01011-P07288_4153-11")
+            self.assertTrue(row["standardise_dir"].endswith("/locke_2015_25673413/standardise/P01011-P07288_4153-11"))
+            self.assertTrue(row["output_prefix"].endswith("/standardise/P01011-P07288_4153-11/P01011-P07288_4153-11"))
+            self.assertEqual(Path(c.row_jsons()[0]["output_prefix"]).with_suffix(".gwas.vcf.gz").name, "P01011-P07288_4153-11.gwas.vcf.gz")
+            self.assertEqual(common.output_stem(c.dir / "work" / "empty"), "standardised")  # no output_name: the files stay standardised.*
+
+        with self.subTest("an output_name with other characters than letters, digits, _ and - fails that row only"):
+            c = case()
+            c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tgood_1\n{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tbad name.v1\n", named)
+            proc = c.prepare(check=False)
+            self.assert_rejected(c, proc, 1)
+            self.assertIn("output_name 'bad name.v1'", proc.stderr)
+
+        with self.subTest("2 rows with the same output_name stop the run"):
+            c = case()
+            c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tsame_1\nhttps://example.org/x.tsv.gz\tBMI\tEUR\tLocke\t2015\t25673413\tsame_1\n", named)
+            proc = c.prepare(check=False)
+            self.assertEqual(proc.returncode, 78)
+            self.assertIn("distinct GWAS_location or output_name values", proc.stderr)
 
         with self.subTest("a problem with the manifest as a whole (2 rows writing the same outputs) stops the run before any row starts"):
             c = case()

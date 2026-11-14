@@ -324,7 +324,7 @@ class WriteAndReportStepTest(unittest.TestCase):
             self.assertTrue(made["report_created"])
             text = Path(made["report_html"]).read_text(encoding="utf-8")
             for section in ("<h2>Steps</h2>", "<h2>QC flags</h2>", "<h2>##SAMPLE header</h2>", "<h2>QQ plots</h2>",
-                            "<h2>Warnings</h2>", "<h2>Time (seconds)</h2>"):
+                            "<h2>Manhattan plots</h2>", "<h2>Warnings</h2>", "<h2>Time (seconds)</h2>"):
                 self.assertIn(section, text)
             self.assertIn("Palindromic (A/T, C/G) SNPs", text)
             self.assertIn("TotalVariants", text)
@@ -343,6 +343,32 @@ class WriteAndReportStepTest(unittest.TestCase):
             self.assertLess(len(observed), 5_000)
             self.assertAlmostEqual(float(observed.max()), float(lp.max()))
             self.assertAlmostEqual(float(expected.max()), -np.log10(0.5 / 100_000))
+
+        with self.subTest("Manhattan plots run along the chromosomes in order, keep every point above LP 3 and thin the bulk"):
+            rng = np.random.default_rng(821)
+            n = 500_000
+            chrom = rng.integers(1, 24, n).astype("int8")
+            pos = rng.uniform(1, 1e8, n)
+            lp = -np.log10(rng.uniform(size=n))
+            x, y, kept_chrom, centres, labels, total, widths = report.manhattan_points(chrom, pos, lp)
+            self.assertEqual(int((y >= 3).sum()), int((lp >= 3).sum()))
+            self.assertLess(len(y), 250_000)
+            self.assertAlmostEqual(float(y.max()), float(lp.max()))
+            self.assertEqual((labels[:3], labels[-1]), (["1", "2", "3"], "X"))
+            self.assertTrue(np.all(np.diff(centres) > 0))
+            self.assertTrue(np.all(np.diff(x[np.argsort(kept_chrom, kind="stable")][np.r_[True, np.diff(np.sort(kept_chrom)) > 0]]) > 0))
+            self.assertLessEqual(float(x.max()), total)
+            self.assertEqual(len(widths), len(labels))
+
+        with self.subTest("a file without chromosome and position gets an empty Manhattan panel with its reason"):
+            fig, ax = report.plt.subplots()
+            report.draw_manhattan(ax, report.EMPTY_POINTS, "Raw Manhattan")
+            self.assertTrue(any("No chromosome and position" in t.get_text() for t in ax.texts))
+            report.plt.close(fig)
+            rsid_only = tmp / "rsid_only.tsv"
+            write_table(rsid_only, ["SNP", "A1", "A2", "b", "se", "p"], [["rs1", "A", "G", 0.1, 0.02, 1e-6], ["rs2", "A", "G", 0.0, 0.02, 0.5]])
+            chrom_codes, positions, values = report.extract_points(rsid_only)
+            self.assertEqual((chrom_codes.tolist(), np.isnan(positions).all(), len(values)), ([0, 0], True, 2))
 
         with self.subTest("an existing report is kept only while it is newer than the VCF"):
             self.assertFalse(plot()["report_created"])

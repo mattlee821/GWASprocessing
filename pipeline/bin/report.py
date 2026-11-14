@@ -33,15 +33,22 @@ import pandas as pd  # noqa: E402
 import gwas_stats  # noqa: E402
 from gwas_pipeline_common import (  # noqa: E402
     BETA_ALIASES,
+    CHR_ALIASES,
     LOGP_ALIASES,
     P_ALIASES,
+    POS19_ALIASES,
+    POS38_ALIASES,
+    POS_ALIASES,
+    PRIMARY_CHROMS,
     SE_ALIASES,
     count_metadata_lines,
     infer_delimiter,
     is_gwas_vcf,
+    normalize_chromosome_series,
     numeric_series,
     parse_bool,
     pick_existing_column,
+    output_stem,
     read_json,
     write_json,
 )
@@ -49,27 +56,63 @@ from gwas_pipeline_common import (  # noqa: E402
 TABLE_CHUNK = 1_000_000
 THIN_BELOW = 2.0
 THIN_RESOLUTION = 0.005
+MANHATTAN_THIN_BELOW = 3.0  # LP: every point above is drawn, the bulk below is thinned to plotting resolution
+MANHATTAN_COLUMNS = 3000  # horizontal resolution of the thinned bulk
+GENOME_WIDE_LP = float(-np.log10(5e-8))
+CHROM_CODE = {chrom: code for code, chrom in enumerate(PRIMARY_CHROMS, start=1)}  # 1-22, X 23, Y 24, MT 25
+Points = tuple  # (chromosome code (0 = unknown), position, LP), 1 float64 or int8 array each
+EMPTY_POINTS = (np.array([], dtype="int8"), np.array([], dtype="float64"), np.array([], dtype="float64"))
 
 
-def lp_from_vcf(path: Path) -> np.ndarray:
+def _codes(series: pd.Series) -> np.ndarray:
+    """Chromosome codes 1-25 (22 autosomes, X, Y, MT); 0 where the chromosome is missing or not recognised."""
+    mapped = normalize_chromosome_series(series.astype(object)).astype(object).map(CHROM_CODE)
+    return np.nan_to_num(mapped.to_numpy(dtype="float64"), nan=0.0).astype("int8")
+
+
+def _join(parts: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> Points:
+    if not parts:
+        return EMPTY_POINTS
+    return tuple(np.concatenate([part[i] for part in parts]) for i in range(3))  # type: ignore[return-value]
+
+
+def points_from_vcf(path: Path) -> Points:
+    """Chromosome, position and LP of every record of a GWAS-VCF, read in blocks so memory holds numbers only."""
     opener = gzip.open if str(path).endswith(".gz") else open
+    parts: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    chrom: list[str] = []
+    pos: list[str] = []
     values: list[str] = []
+
+    def flush() -> None:
+        if values:
+            parts.append((_codes(pd.Series(chrom, dtype=object)), numeric_series(pd.Series(pos, dtype=object)).to_numpy(dtype="float64"),
+                          numeric_series(pd.Series(values, dtype=object)).to_numpy(dtype="float64")))
+            chrom.clear(), pos.clear(), values.clear()
+
     with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
         for line in handle:
             if line.startswith("#") or not line.strip():
                 continue
-            parts = line.rstrip("\n").split("\t")
-            if len(parts) < 10:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 10:
                 continue
-            keys = parts[8].split(":")
+            keys = fields[8].split(":")
             if "LP" in keys:
-                sample = parts[9].split(":")
+                sample = fields[9].split(":")
                 index = keys.index("LP")
+                chrom.append(fields[0])
+                pos.append(fields[1])
                 values.append(sample[index] if index < len(sample) else ".")
-    return numeric_series(pd.Series(values, dtype=object)).to_numpy(dtype="float64")
+                if len(values) >= 500_000:
+                    flush()
+    flush()
+    return _join(parts)
 
 
-def lp_from_table(path: Path, source_columns: dict[str, str] | None = None, delimiter: str | None = None) -> np.ndarray:
+def points_from_table(path: Path, source_columns: dict[str, str] | None = None, delimiter: str | None = None) -> Points:
+    """Chromosome, position and LP of a table of summary statistics; chromosome and position are missing (0, NaN) when the
+    table has no such columns. Position is the file's own (its build is not changed)."""
     sep = delimiter or infer_delimiter(path)
     skip = count_metadata_lines(path)
     compression = "gzip" if str(path).endswith(".gz") else None
@@ -87,27 +130,34 @@ def lp_from_table(path: Path, source_columns: dict[str, str] | None = None, deli
         return stripped[found] if found else None
 
     cols = {field: column(field, aliases) for field, aliases in
-            (("P", P_ALIASES), ("LOG10P", LOGP_ALIASES), ("BETA", BETA_ALIASES), ("SE", SE_ALIASES))}
+            (("P", P_ALIASES), ("LOG10P", LOGP_ALIASES), ("BETA", BETA_ALIASES), ("SE", SE_ALIASES), ("CHR", CHR_ALIASES))}
+    cols["POS"] = column("POS", POS_ALIASES) or column("POS38", POS38_ALIASES) or column("POS19", POS19_ALIASES)
     usecols = sorted({c for c in cols.values() if c})
     if not (cols["P"] or cols["LOG10P"]):
-        return np.array([], dtype="float64")
-    chunks = []
+        return EMPTY_POINTS
+    parts: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
     reader = pd.read_csv(path, sep=sep, compression=compression, usecols=usecols, chunksize=TABLE_CHUNK, low_memory=False,
                          skiprows=skip, na_values=["."])
     for chunk in reader:
         get = lambda field: numeric_series(chunk[cols[field]]) if cols[field] else None  # noqa: E731
         lp, _ = gwas_stats.compute_lp(p=get("P"), log10p=get("LOG10P"), beta=get("BETA"), se=get("SE"))
-        chunks.append(lp)
-    return np.concatenate(chunks) if chunks else np.array([], dtype="float64")
+        chrom = _codes(chunk[cols["CHR"]]) if cols["CHR"] else np.zeros(len(chunk), dtype="int8")
+        pos = numeric_series(chunk[cols["POS"]]).to_numpy(dtype="float64") if cols["POS"] else np.full(len(chunk), np.nan)
+        parts.append((chrom, pos, np.asarray(lp, dtype="float64")))
+    return _join(parts)
+
+
+def extract_points(path: str | Path, source_columns: dict[str, str] | None = None, delimiter: str | None = None) -> Points:
+    path = Path(path)
+    if not path.exists():
+        return EMPTY_POINTS
+    if is_gwas_vcf(path):
+        return points_from_vcf(path)
+    return points_from_table(path, source_columns, delimiter)
 
 
 def extract_lp(path: str | Path, source_columns: dict[str, str] | None = None, delimiter: str | None = None) -> np.ndarray:
-    path = Path(path)
-    if not path.exists():
-        return np.array([], dtype="float64")
-    if is_gwas_vcf(path):
-        return lp_from_vcf(path)
-    return lp_from_table(path, source_columns, delimiter)
+    return extract_points(path, source_columns, delimiter)[2]
 
 
 def qq_points(lp: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -143,6 +193,53 @@ def draw_qq(ax: Any, lp: np.ndarray, title: str) -> float | None:
     ax.set_ylabel("Observed -log10(P)")
     ax.set_title(f"{title} (n={n:,}, lambda={lam:.3f})" if lam is not None else f"{title} (n={n:,})")
     return lam
+
+
+def manhattan_points(chrom: np.ndarray, pos: np.ndarray, lp: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], float, list[float]]:
+    """(x, LP, chromosome code, chromosome label positions, labels, genome length, chromosome lengths): x runs along the chromosomes in
+    order. Every point above LP 3 is kept and the bulk below is thinned to the plotting resolution."""
+    ok = (chrom > 0) & np.isfinite(pos) & np.isfinite(lp) & (lp >= 0)
+    chrom, pos, lp = chrom[ok], pos[ok], lp[ok]
+    present = np.unique(chrom)
+    if present.size == 0:
+        return np.array([]), np.array([]), np.array([], dtype="int8"), np.array([]), [], 0.0, []
+    gap = float(pos.max()) * 0.01
+    offset = np.zeros(26, dtype="float64")
+    centres, labels, widths, running = [], [], [], 0.0
+    for code in present:
+        length = float(pos[chrom == code].max())
+        offset[code] = running
+        centres.append(running + length / 2)
+        labels.append(PRIMARY_CHROMS[code - 1])
+        widths.append(length)
+        running += length + gap
+    x = offset[chrom] + pos
+    bulk = lp < MANHATTAN_THIN_BELOW
+    cells = np.round(x[bulk] / (running / MANHATTAN_COLUMNS)).astype("int64") * 1000 + np.round(lp[bulk] / 0.05).astype("int64")
+    _, first = np.unique(cells, return_index=True)
+    keep = np.concatenate([np.where(~bulk)[0], np.where(bulk)[0][np.sort(first)]])
+    keep.sort()
+    return x[keep], lp[keep], chrom[keep], np.array(centres), labels, running, widths
+
+
+def draw_manhattan(ax: Any, points: Points, title: str) -> None:
+    x, y, chrom, centres, labels, total, widths = manhattan_points(*points)
+    if x.size == 0:
+        ax.text(0.5, 0.5, "No chromosome and position", ha="center", va="center")
+        ax.set_title(title)
+        return
+    n = int(np.isfinite(points[2]).sum())
+    ax.scatter(x, y, s=5, c=np.where(chrom % 2 == 0, "#1f77b4", "0.55"), alpha=0.6, linewidths=0, rasterized=True)
+    ax.axhline(GENOME_WIDE_LP, color="black", linewidth=0.8, linestyle="--")
+    ax.set_xticks(centres)
+    # the narrow chromosomes (19-22, Y, MT) would overlap, so every other one of them is set 1 line lower
+    ax.set_xticklabels([f"\n{label}" if i % 2 == 1 and width / total < 0.03 else label
+                        for i, (label, width) in enumerate(zip(labels, widths))], fontsize=6)
+    ax.set_xlim(0, float(x.max()) * 1.01)
+    ax.set_ylim(0, float(max(y.max(), GENOME_WIDE_LP)) * 1.05)
+    ax.set_xlabel("Chromosome")
+    ax.set_ylabel("-log10(P)")
+    ax.set_title(f"{title} (n={n:,})")
 
 
 CSS = """
@@ -188,7 +285,18 @@ def qq_png(raw_lp: np.ndarray, std_lp: np.ndarray, title: str) -> tuple[str, flo
     return base64.b64encode(buffer.getvalue()).decode("ascii"), lam_raw, lam_std
 
 
-def render(record: dict[str, Any], qc: dict[str, Any], png: str) -> str:
+def manhattan_png(raw_points: Points, std_points: Points, title: str) -> str:
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5), constrained_layout=True)
+    draw_manhattan(axes[0], raw_points, "Raw Manhattan")
+    draw_manhattan(axes[1], std_points, "Standardised Manhattan")
+    fig.suptitle(title, fontsize=11)
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format="png", dpi=110)
+    plt.close(fig)
+    return base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def render(record: dict[str, Any], qc: dict[str, Any], png: str, manhattan: str = "") -> str:
     sample = qc.get("sample_header", {}) or {}
     build = qc.get("build_detection", {}) or {}
     flags = qc.get("qc_flags", {}) or {}
@@ -222,6 +330,8 @@ def render(record: dict[str, Any], qc: dict[str, Any], png: str) -> str:
                      + (f"<ul>{''.join(items)}</ul>" if items else ""))
     if png:
         parts.append(f"<h2>QQ plots</h2><img alt='Raw and standardised QQ plots' src='data:image/png;base64,{png}'>")
+    if manhattan:
+        parts.append(f"<h2>Manhattan plots</h2><img alt='Raw and standardised Manhattan plots' src='data:image/png;base64,{manhattan}'>")
     if qc.get("warnings"):
         parts.append("<h2>Warnings</h2><ul>" + "".join(f"<li>{_e(w)}</li>" for w in qc["warnings"]) + "</ul>")
     timings = qc.get("timings_s") or {}
@@ -234,12 +344,14 @@ def render(record: dict[str, Any], qc: dict[str, Any], png: str) -> str:
 
 
 def write_report(record: dict[str, Any], qc: dict[str, Any], report_path: Path, raw_path: str | Path | None) -> dict[str, Any]:
-    raw_lp = extract_lp(raw_path, qc.get("source_columns"), qc.get("input_delimiter")) if raw_path else np.array([])
-    std_lp = extract_lp(record["standard_vcf"])
-    png, lam_raw, lam_std = qq_png(raw_lp, std_lp, f"{record.get('study_id', '')} | {record.get('phenotype', '')} | {record.get('ancestry', '')}")
+    raw_points = extract_points(raw_path, qc.get("source_columns"), qc.get("input_delimiter")) if raw_path else EMPTY_POINTS
+    std_points = extract_points(record["standard_vcf"])
+    title = f"{record.get('study_id', '')} | {record.get('phenotype', '')} | {record.get('ancestry', '')}"
+    png, lam_raw, lam_std = qq_png(raw_points[2], std_points[2], title)
+    manhattan = manhattan_png(raw_points, std_points, title)
     report_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = report_path.with_name(f".{report_path.name}.tmp")
-    tmp.write_text(render(record, qc, png), encoding="utf-8")
+    tmp.write_text(render(record, qc, png, manhattan), encoding="utf-8")
     tmp.replace(report_path)
     return {"lambda_gc_raw": lam_raw, "lambda_gc_standardised": lam_std}
 
@@ -256,11 +368,12 @@ def main() -> None:
 
     if args.dir:
         folder = Path(args.dir) if Path(args.dir).is_dir() else Path(args.dir).parent
-        qc = read_json(folder / "standardised.qc.json")
-        metadata = read_json(folder / "standardised.metadata.json")
-        record = {**metadata, "standard_vcf": str(folder / "standardised.gwas.vcf.gz")}
+        stem = output_stem(folder)
+        qc = read_json(folder / f"{stem}.qc.json")
+        metadata = read_json(folder / f"{stem}.metadata.json")
+        record = {**metadata, "standard_vcf": str(folder / f"{stem}.gwas.vcf.gz")}
         raw = args.raw or metadata.get("raw_path", "")
-        out = folder / "standardised.report.html"
+        out = folder / f"{stem}.report.html"
         write_report(record, qc, out, raw if raw and Path(raw).exists() else None)
         print(out)
         return

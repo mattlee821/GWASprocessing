@@ -151,7 +151,16 @@ def main() -> None:
         metadata["md5"] = verify_local_md5(source)
         if metadata["md5"]["checked"] and not metadata["md5"]["ok"]:
             raise data_error(f"MD5 check failed for {source}: {metadata['md5'].get('error') or 'the file does not match ' + metadata['md5']['sidecar']}")
-        raw_path = copy_local(location, raw_dir)
+        study_raw = raw_dir.parent.resolve()  # <work root>/<study>/raw: a file already here is the study's raw file
+        if source.resolve().is_relative_to(study_raw):
+            raw_path = source.resolve()
+            metadata["in_place"] = True
+            try:
+                raw_dir.rmdir()  # nothing is staged, so the row's own raw folder stays empty
+            except OSError:
+                pass
+        else:
+            raw_path = copy_local(location, raw_dir)
         if not metadata["md5"]["checked"]:
             metadata["gzip"] = verify_gzip(raw_path)
             if metadata["gzip"].get("checked") and not metadata["gzip"].get("ok"):

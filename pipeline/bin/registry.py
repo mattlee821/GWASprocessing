@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from gwas_pipeline_common import read_json, read_state, utc_now, write_json
+from gwas_pipeline_common import output_stem, read_json, read_state, utc_now, write_json
 
 REGISTRY = ".manifest_registry.json"
 PAGE = "manifest.html"
@@ -76,8 +76,9 @@ def update_registry(work_root: Path, log_root: Path | None) -> dict[str, dict[st
 def row_view(entry: dict[str, Any], work_root: Path) -> dict[str, Any]:
     """Everything the page shows for 1 row, read from its output folder."""
     folder = Path(entry.get("standardise_dir") or "")
-    vcf, qc_path, report = (folder / name for name in ("standardised.gwas.vcf.gz", "standardised.qc.json", "standardised.report.html"))
-    metadata = _json(folder / "standardised.metadata.json")
+    stem = output_stem(folder) if folder.parts else "standardised"
+    vcf, qc_path, report = (folder / name for name in (f"{stem}.gwas.vcf.gz", f"{stem}.qc.json", f"{stem}.report.html"))
+    metadata = _json(folder / f"{stem}.metadata.json")
     qc = _json(qc_path)
     status = entry.get("status", "")
     if status == "complete" and not vcf.exists():

@@ -25,6 +25,7 @@ from gwas_pipeline_common import (
     EXIT_CONFIG,
     MANIFEST_COLUMNS,
     MANIFEST_OPTIONAL_COLUMNS,
+    valid_output_name,
     SUPER_POPULATIONS,
     atomic_write_text,
     infer_source_type,
@@ -83,6 +84,9 @@ def validate_row(row: dict[str, str], line: int, source_type: str) -> list[str]:
     population = str(row.get("population", "") or "").strip()
     if population and population.upper() not in SUPER_POPULATIONS:
         errors.append(f"row {line}: population '{population}' must be ALL, AFR, AMR, EAS, EUR or SAS (or empty)")
+    output_name = str(row.get("output_name", "") or "").strip()
+    if output_name and not valid_output_name(output_name):
+        errors.append(f"row {line}: output_name '{output_name}' may hold only letters, digits, _ and - (and start with a letter or digit)")
     data_format = str(row.get("format", "") or "").strip().lower()
     if data_format and data_format not in FORMAT_VALUES:
         errors.append(f"row {line}: format '{row.get('format')}' must be table or vcf (or empty to detect it)")
@@ -132,10 +136,11 @@ def main() -> None:
             row["GWAS_location"] = resolve_local_location(original_location, repo_root, manifest.parent)
         output_id = output_id_from_row({**row, "GWAS_location": original_location}, source_type)
         standardise_dir = work_root / study_id / "standardise" / output_id
-        output_prefix = standardise_dir / "standardised"
+        output_name = str(row.get("output_name", "") or "").strip()
+        output_prefix = standardise_dir / (output_name if output_name and valid_output_name(output_name) else "standardised")
         if str(output_prefix) in seen_outputs:
             errors.append(f"rows {seen_outputs[str(output_prefix)]} and {line} write to the same output directory "
-                          f"{standardise_dir}; give them distinct GWAS_location values or split the study")
+                          f"{standardise_dir}; give them distinct GWAS_location or output_name values, or split the study")
             continue
         seen_outputs[str(output_prefix)] = line
         out_row: dict[str, Any] = {col: row.get(col, "") for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}

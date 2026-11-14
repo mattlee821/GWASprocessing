@@ -50,7 +50,7 @@ def data_error(message: str) -> SystemExit:
 
 
 MANIFEST_COLUMNS = ["GWAS_location", "phenotype", "ancestry", "author", "year", "PMID"]
-MANIFEST_OPTIONAL_COLUMNS = ["sex", "source_type", "input_build", "population", "delimiter", "format", "study_yaml"]
+MANIFEST_OPTIONAL_COLUMNS = ["sex", "source_type", "input_build", "population", "delimiter", "format", "study_yaml", "output_name"]
 STATE_COLUMNS = [
     "row_hash",
     "study_id",
@@ -223,7 +223,24 @@ def extract_accession_or_basename(location: str, source_type: str) -> str:
     return name or source_type
 
 
+OUTPUT_NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")  # no dot: the file suffixes (.gwas.vcf.gz) follow the name
+
+
+def valid_output_name(name: str) -> bool:
+    return bool(OUTPUT_NAME_PATTERN.fullmatch(name))
+
+
+def output_stem(folder: str | Path) -> str:
+    """The file name stem of a standardise folder: the folder's own name when the row set output_name (the files are
+    <name>.gwas.vcf.gz and so on), otherwise `standardised`."""
+    folder = Path(folder)
+    return folder.name if (folder / f"{folder.name}.qc.json").exists() else "standardised"
+
+
 def output_id_from_row(row: dict[str, str], source_type: str) -> str:
+    name = str(row.get("output_name", "") or "").strip()
+    if name and valid_output_name(name):
+        return name
     source_id = extract_accession_or_basename(row["GWAS_location"], source_type)
     prefix = {
         "gwas_catalog": "GWAScatalog",

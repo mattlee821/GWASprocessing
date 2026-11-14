@@ -187,6 +187,22 @@ class Step01StageTest(unittest.TestCase):
             proc, record = self.stage(self.row(data, "local", name="local_no_md5"))
             self.assertEqual((proc.returncode, record["metadata"]["md5"]["checked"], record["metadata"]["gzip"]["ok"]), (0, False, True))
 
+        with self.subTest("A local file already in the study's raw folder is used where it is; any other local file is copied"):
+            text = b"Chrom\tPos\nchr1\t100\n"
+            inside = self.tmp / "in_place" / "P1_GENE.txt.gz"  # the row's raw_dir is in_place/raw, so in_place is the study's raw folder
+            inside.parent.mkdir(parents=True)
+            inside.write_bytes(gzip.compress(text))
+            proc, record = self.stage(self.row(inside, "local", name="in_place"))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual((Path(record["raw_path"]), record["metadata"].get("in_place")), (inside.resolve(), True))
+            self.assertFalse((self.tmp / "in_place" / "raw").exists())  # no staged copy, no empty folder
+            outside = self.tmp / "elsewhere" / "P2_GENE.txt.gz"
+            outside.parent.mkdir(parents=True)
+            outside.write_bytes(gzip.compress(text))
+            proc, record = self.stage(self.row(outside, "local", name="copied"))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual((Path(record["raw_path"]).parent.name, record["metadata"].get("in_place")), ("raw", None))
+
         with self.subTest("A download that fails the gzip integrity check is rejected"):
             corrupt = self.tmp / "ftp_corrupt"
             gwas_catalog_mirror(corrupt, raw=gzip.compress(b"SNP\tP\n" * 1000)[:-20])  # truncated gzip stream

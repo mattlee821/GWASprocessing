@@ -43,15 +43,15 @@ class Install:
     def folder(self, study: str, output_id: str) -> Path:
         return self.work / study / "standardise" / output_id
 
-    def outputs(self, study: str, output_id: str) -> Path:
+    def outputs(self, study: str, output_id: str, stem: str = "standardised") -> Path:
         folder = self.folder(study, output_id)
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "standardised.gwas.vcf.gz").write_bytes(b"x")
-        (folder / "standardised.report.html").write_text("<html></html>", encoding="utf-8")
-        (folder / "standardised.metadata.json").write_text(json.dumps(
+        (folder / f"{stem}.gwas.vcf.gz").write_bytes(b"x")
+        (folder / f"{stem}.report.html").write_text("<html></html>", encoding="utf-8")
+        (folder / f"{stem}.metadata.json").write_text(json.dumps(
             {"phenotype": "BMI", "ancestry": "ALL", "sex": "combined", "author": "Locke", "year": "2015", "PMID": "25673413",
              "GWAS_location": "https://www.ebi.ac.uk/gwas/studies/GCST002783"}), encoding="utf-8")
-        (folder / "standardised.qc.json").write_text(json.dumps(
+        (folder / f"{stem}.qc.json").write_text(json.dumps(
             {"input_rows": 2555510, "output_rows": 2554903, "lambda_gc": 1.234, "completed_at": "2026-11-12T10:00:00+00:00",
              "coordinate_source": "dbsnp", "qc_flags": {"n_p_sig": "more than 1,000 variants at P < 5e-8"},
              "warnings": ["weak frequency correlation"],
@@ -150,6 +150,16 @@ class ManifestPageTest(unittest.TestCase):
             proc = run_script("registry.py", "--work-root", i.work, "--log-root", i.logs)
             self.assertIn(str(i.work / "manifest.html"), proc.stdout)
             self.assertIn("1 complete", (i.work / "manifest.html").read_text(encoding="utf-8"))
+
+        with self.subTest("a row whose files are named by output_name is listed with links to those files"):
+            i = install()
+            named = i.outputs("ferkingstad_2021_34857953", "P01011-P07288_4153-11", stem="P01011-P07288_4153-11")
+            i.state([{**state_row("c3", named), "standard_vcf": str(named / "P01011-P07288_4153-11.gwas.vcf.gz")}])
+            page = i.page()
+            self.assertIn("1 complete, 0 failed, 0 with outputs missing", page)
+            prefix = "ferkingstad_2021_34857953/standardise/P01011-P07288_4153-11"
+            for target in (f"{prefix}/P01011-P07288_4153-11.report.html", f"{prefix}/P01011-P07288_4153-11.gwas.vcf.gz"):
+                self.assertIn(f'href="{target}"', page)
 
 
 if __name__ == "__main__":
