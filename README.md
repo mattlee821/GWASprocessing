@@ -31,6 +31,7 @@ The reference data (about 41 GB of downloads and 30 GB of lookups), the GWAS out
 | `GWAS_WORK_ROOT` | the GWAS outputs and `manifest.html` |
 | `GWAS_REFERENCE_ROOT` | the built reference lookups, read at random positions on every run |
 | `GWAS_TEMP_ROOT` (with `GWAS_LOG_ROOT`, `GWAS_NEXTFLOW_WORK`, `GWAS_NEXTFLOW_LOG`) | logs and Nextflow work files |
+| `GWAS_TMPDIR` | the multi-GB intermediate pieces of each GWAS while it runs (about 10 to 15 GB each). Under SLURM the default `/tmp` is node-local and can be small, so setup puts it in `temp/tmp`; a row stops with a message when under `GWAS_MIN_FREE_GB` (default 30) is free |
 | `GWAS_REFERENCE_RAW_ROOT` | the raw reference downloads, read once while the references are built, so a slow or external drive will do |
 
 Keep the first 3 on local or scratch storage, and avoid cloud-synced folders.

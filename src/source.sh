@@ -45,7 +45,7 @@ set_env_var() {
 
 # Paths filled into a new .env when they are still placeholders or empty, relative to the data home.
 ENV_DEFAULT_PATHS=(GWAS_WORK_ROOT=GWAS GWAS_REFERENCE_ROOT=references GWAS_TEMP_ROOT=temp GWAS_LOG_ROOT=temp/logs
-                   GWAS_NEXTFLOW_WORK=temp/nextflow_work GWAS_NEXTFLOW_LOG=temp/.nextflow.log)
+                   GWAS_NEXTFLOW_WORK=temp/nextflow_work GWAS_NEXTFLOW_LOG=temp/.nextflow.log GWAS_TMPDIR=temp/tmp)
 
 # ensure_env_file: create .env from .env.example when it is missing, then fill each path still a /WHERE/...
 # placeholder or empty: from the environment when set there, otherwise

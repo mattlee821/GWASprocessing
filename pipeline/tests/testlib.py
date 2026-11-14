@@ -35,6 +35,7 @@ for _var in ("http_proxy", "https_proxy", "ftp_proxy", "all_proxy", "HTTP_PROXY"
     os.environ[_var] = "http://127.0.0.1:9"
 os.environ["no_proxy"] = os.environ["NO_PROXY"] = "127.0.0.1,localhost"
 os.environ.setdefault("NXF_OFFLINE", "true")
+os.environ.setdefault("GWAS_MIN_FREE_GB", "0")  # the free-space check has its own test
 
 
 # Example liftover: on chromosomes 1 and 2, GRCh38 = GRCh37 + 100 for positions 1..1,000,000.

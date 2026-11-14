@@ -294,8 +294,21 @@ def read_state(path: str | Path) -> dict[str, dict[str, str]]:
 
 def make_work_dir(prefix: str = "gwasprocessing-") -> Path:
     """Private directory for large intermediates: $GWAS_TMPDIR if set, else the system temporary directory
-    (node-local scratch under SLURM). Keeps multi-GB files out of the output folder."""
-    return Path(tempfile.mkdtemp(prefix=prefix, dir=os.environ.get("GWAS_TMPDIR") or None))
+    (node-local scratch under SLURM). Keeps multi-GB files out of the output folder. Stops with a clear message when
+    that folder has less than $GWAS_MIN_FREE_GB free (default 30; 0 turns the check off), so a full scratch disk is
+    reported before a run rather than as a write error part-way through. Exit status 1: Nextflow retries the row,
+    possibly on another node."""
+    base = os.environ.get("GWAS_TMPDIR") or None
+    if base:
+        Path(base).mkdir(parents=True, exist_ok=True)
+    where = Path(base or tempfile.gettempdir())
+    minimum = float(os.environ.get("GWAS_MIN_FREE_GB", "30") or 0)
+    free = shutil.disk_usage(where).free / 1e9
+    if minimum > 0 and free < minimum:
+        print(f"Scratch folder {where} has {free:.0f} GB free and the pipeline needs at least {minimum:.0f} GB: set "
+              "GWAS_TMPDIR in .env to a larger folder (or lower GWAS_MIN_FREE_GB)", file=sys.stderr)
+        raise SystemExit(1)
+    return Path(tempfile.mkdtemp(prefix=prefix, dir=base))
 
 
 def atomic_write_text(path: str | Path, text: str) -> None:

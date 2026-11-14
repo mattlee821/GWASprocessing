@@ -272,6 +272,15 @@ if [[ "${DRY_RUN}" != "true" ]]; then
     || echo "Warning: could not update ${WORK_ROOT}/manifest.html" >&2
 fi
 
+# the Nextflow log and the SLURM output of this run, into GWAS/<STUDY>/logs/ of every study in it
+if [[ "${DRY_RUN}" != "true" ]]; then
+  slurm_out=""
+  if [[ -n "${SLURM_JOB_ID:-}" ]]; then slurm_out="${SLURM_SUBMIT_DIR:-${PWD}}/slurm-${SLURM_JOB_ID}.out"; fi
+  python3 "${ROOT_DIR}/pipeline/bin/copy_logs.py" --work-root "${WORK_ROOT}" --run-manifest "${LOG_ROOT}/run_manifest.tsv" \
+    --nextflow-log "${NEXTFLOW_LOG}" ${slurm_out:+--slurm-out "${slurm_out}"} \
+    || echo "Warning: could not copy the run logs into ${WORK_ROOT}/<study>/logs/" >&2
+fi
+
 if [[ "${status}" -ne 0 ]]; then
   exit "${status}"
 fi

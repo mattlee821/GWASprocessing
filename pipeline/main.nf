@@ -39,6 +39,8 @@ process PREPARE_MANIFEST {
 
 process STANDARDISE_ROW {
     tag "${row_json.baseName}"
+    // The task's output goes to GWAS/<STUDY>/logs/ after every row, also a failed one
+    afterScript "python3 ${params.pipeline_root}/bin/copy_logs.py --work-root ${params.work_root} --row-json ${row_json}"
 
     input:
     path row_json
