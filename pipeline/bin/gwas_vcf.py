@@ -248,15 +248,15 @@ def require_htslib() -> None:
         )
 
 
-def bgzip_and_index(sources: Path | list[Path], vcf_path: Path) -> None:
-    """Concatenate `sources` (e.g. header then body), bgzip to `vcf_path` atomically, tabix-index it, remove the sources."""
+def bgzip_and_index(sources: Path | list[Path], vcf_path: Path, threads: int = 1) -> None:
+    """Concatenate `sources` (e.g. header then body), bgzip (with `threads` threads) to `vcf_path` atomically, tabix-index it, remove the sources."""
     require_htslib()
     parts = [Path(sources)] if isinstance(sources, (str, Path)) else [Path(p) for p in sources]
     tmp = vcf_path.with_name(f".{vcf_path.name}.tmp-{os.getpid()}")
     try:
         with open(tmp, "wb") as handle:
             cat = subprocess.Popen(["cat", *map(str, parts)], stdout=subprocess.PIPE)
-            subprocess.run(["bgzip", "-c"], stdin=cat.stdout, stdout=handle, check=True)
+            subprocess.run(["bgzip", "-c", "-@", str(max(1, int(threads)))], stdin=cat.stdout, stdout=handle, check=True)
             cat.stdout.close()
             if cat.wait() != 0:
                 raise RuntimeError(f"cat exited {cat.returncode} while compressing {vcf_path}")

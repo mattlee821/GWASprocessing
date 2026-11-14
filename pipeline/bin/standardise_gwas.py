@@ -975,7 +975,7 @@ def write_piece_lines(part: Path, out: pd.DataFrame, rows: np.ndarray, low: np.n
 
 def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any],
                  decisions: dict[str, Any], fasta: Any, qc: dict[str, Any], timings: dict[str, float] | None = None,
-                 reference_root: str = "", population: str = "") -> None:
+                 reference_root: str = "", population: str = "", threads: int = 1) -> None:
     """Sort all pieces by position, drop alignment failures, remove duplicates, then write the header (whose
     ##SAMPLE counts are final only now) in front of the body, bgzip and index."""
     timings = {} if timings is None else timings
@@ -1066,7 +1066,7 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
                                                        multiallelic=bool((qc.get("multiallelic") or {}).get("other_allele_from_id")))) + "\n", encoding="utf-8")
     timings["sort_merge_deduplicate"] = time.perf_counter() - started
     started = time.perf_counter()
-    gwas_vcf.bgzip_and_index([header, body], vcf_path)
+    gwas_vcf.bgzip_and_index([header, body], vcf_path, threads=threads)
     timings["compress_and_index"] = time.perf_counter() - started
 
 
@@ -1307,7 +1307,7 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
         moments = merge_piece_qc(qc, results, record)
         check_af_concordance(moments, qc)
         merge_pieces([Path(r["part"]) for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall,
-                     reference_root, population)
+                     reference_root, population, threads=workers)
         per_step: dict[str, float] = {}
         for result in results:
             for step, seconds in result["timings"].items():
