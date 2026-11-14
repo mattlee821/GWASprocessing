@@ -35,7 +35,7 @@ GRCH38_LENGTHS = {
     "13": 114364328, "14": 107043718, "15": 101991189, "16": 90338345, "17": 83257441, "18": 80373285,
     "19": 58617616, "20": 64444167, "21": 46709983, "22": 50818468, "X": 156040895, "Y": 57227415, "MT": 16569,
 }
-RESERVED_INFO = {"SNPID", "HM"}
+RESERVED_INFO = {"SNPID", "HM", "MA"}
 _RANK = {chrom: rank for rank, chrom in enumerate(PRIMARY_CHROMS, start=1)}
 
 FORMAT_DEFINITIONS = {
@@ -66,6 +66,9 @@ INFO_DEFINITIONS = [
     '##INFO=<ID=SNPID,Number=1,Type=String,Description="Variant identifier in the source file">',
     f'##INFO=<ID=HM,Number=1,Type=String,Description="{HM_DESCRIPTION}">',
 ]
+MA_DEFINITION = ('##INFO=<ID=MA,Number=0,Type=Flag,Description="Multiallelic site: ES and AF are for ALT (the effect allele) '
+                 'against all other alleles combined, not against REF alone. The study gave no other allele; REF is the '
+                 'allele in the study variant ID. Exclude with bcftools view -e INFO/MA=1">')
 # ##SAMPLE keys with their ##META type and description, in the order written.
 SAMPLE_KEYS = {
     "TotalVariants": ("Integer", "Total number of variants in input"),
@@ -154,7 +157,7 @@ def sample_header_lines(sample: str, fields: dict[str, Any]) -> list[str]:
 
 
 def table_header(record: dict[str, Any], extras: Iterable[str], keys: list[str], sample_fields: dict[str, Any],
-                 reference: str = "GRCh38", settings_hash: str = "") -> list[str]:
+                 reference: str = "GRCh38", settings_hash: str = "", multiallelic: bool = False) -> list[str]:
     extras_info = [f'##INFO=<ID={info_key(name)},Number=1,Type=String,Description="Source column {sanitize_header_value(name)}">'
                    for name in extras]
     sample = sample_name(record)
@@ -169,6 +172,7 @@ def table_header(record: dict[str, Any], extras: Iterable[str], keys: list[str],
         *contig_header_lines(),
         '##FILTER=<ID=PASS,Description="All filters passed">',
         *INFO_DEFINITIONS,
+        *([MA_DEFINITION] if multiallelic else []),
         *extras_info,
         *[f'##FORMAT=<ID={key},Number={FORMAT_DEFINITIONS[key][0]},Type={FORMAT_DEFINITIONS[key][1]},'
           f'Description="{FORMAT_DEFINITIONS[key][2]}">' for key in keys],
@@ -212,6 +216,8 @@ def table_body_lines(df: pd.DataFrame, extras: Iterable[str], keys: list[str], a
     snpid = [info_value(v) for v in df["SNPID"]] if "SNPID" in df.columns else ["."] * len(df)
     hm = df["HM"].fillna(".").astype(str).to_numpy(dtype=object) if "HM" in df.columns else np.full(len(df), ".", dtype=object)
     info = np.array([f"SNPID={s};HM={h}" for s, h in zip(snpid, hm)], dtype=object)
+    if "MA" in df.columns and df["MA"].fillna(False).astype(bool).any():
+        info = info + np.where(df["MA"].fillna(False).astype(bool).to_numpy(), ";MA", "").astype(object)
     for name in extras:
         values = [info_value(v) for v in df[name]] if name in df.columns else ["."] * len(df)
         info = info + np.array([f";{info_key(name)}={v}" for v in values], dtype=object)

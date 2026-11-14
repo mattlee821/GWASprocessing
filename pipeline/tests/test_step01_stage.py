@@ -169,6 +169,24 @@ class Step01StageTest(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "MD5"):
                     download_gwas_catalog.download_gwas_catalog(ACCESSION, self.tmp / "bad_md5", PMID)
 
+        with self.subTest("A local file is checked against the md5sum beside it, whether it hashes the file or the text inside a .gz"):
+            text = b"Chrom\tPos\nchr1\t100\n"
+            local = self.tmp / "local_md5"
+            local.mkdir()
+            data = local / "P1_GENE.txt.gz"
+            data.write_bytes(gzip.compress(text))
+            (local / "P1_GENE.txt.md5sum").write_text(f"{hashlib.md5(text).hexdigest()}  assocs_filtered/P1_GENE.txt\n", encoding="utf-8")
+            proc, record = self.stage(self.row(data, "local", name="local_md5_ok"))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual((record["metadata"]["md5"]["ok"], record["metadata"]["md5"]["matched"]), (True, "uncompressed"))
+            (local / "P1_GENE.txt.md5sum").write_text("0" * 32 + "  assocs_filtered/P1_GENE.txt\n", encoding="utf-8")
+            proc, record = self.stage(self.row(data, "local", name="local_md5_bad"))
+            self.assertEqual((proc.returncode, record), (65, None))
+            self.assertIn("MD5 check failed", proc.stderr)
+            (local / "P1_GENE.txt.md5sum").unlink()
+            proc, record = self.stage(self.row(data, "local", name="local_no_md5"))
+            self.assertEqual((proc.returncode, record["metadata"]["md5"]["checked"], record["metadata"]["gzip"]["ok"]), (0, False, True))
+
         with self.subTest("A download that fails the gzip integrity check is rejected"):
             corrupt = self.tmp / "ftp_corrupt"
             gwas_catalog_mirror(corrupt, raw=gzip.compress(b"SNP\tP\n" * 1000)[:-20])  # truncated gzip stream

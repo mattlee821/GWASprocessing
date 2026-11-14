@@ -324,6 +324,19 @@ def read_json(path: str | Path) -> dict[str, Any]:
         return json.load(handle)
 
 
+class _StudyYamlLoader(yaml.SafeLoader):
+    """safe_load with YAML 1.2 booleans (only true and false): the YAML 1.1 reading turns an unquoted `on:` key (a join's
+    `on: Name`) into the boolean True, and values such as yes, no and off into booleans."""
+
+
+_StudyYamlLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_StudyYamlLoader.add_implicit_resolver("tag:yaml.org,2002:bool", re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+                                       list("tTfF"))
+
+
 def load_yaml(path: str | Path | None) -> dict[str, Any]:
     if not path:
         return {}
@@ -331,7 +344,7 @@ def load_yaml(path: str | Path | None) -> dict[str, Any]:
     if not path.exists():
         return {}
     with open(path, encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
+        data = yaml.load(handle, Loader=_StudyYamlLoader) or {}
     if not isinstance(data, dict):
         raise ValueError(f"YAML config must be a mapping: {path}")
     data["_config_path"] = str(path)

@@ -42,6 +42,7 @@ import gwas_reference as grch38
 import gwas_stats
 import gwas_steps
 import gwas_vcf
+import gwas_lookup
 from gwas_pipeline_common import (
     ALT_ALIASES,
     BETA_ALIASES,
@@ -104,7 +105,7 @@ FIELD_ALIASES = {
 FAMILY_FIELDS = ("EA", "OA", "BETA", "EAF", "OR", "CI_LOWER", "CI_UPPER", "CHR", "POS")
 KNOWN_CONFIG_KEYS = {"description", "input_build", "delimiter", "columns", "exclude", "exclusions", "joins",
                      "transforms", "extras", "format", "reference_population", "palindromic_tolerance", "sample",
-                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "_config_path"}
+                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "multiallelic", "_config_path"}
 KNOWN_TRANSFORMS = {"strip_hash_header", "uppercase_alleles", "derive_oa_from_ref_alt"}
 REQUIRED_FIELDS = ("CHR", "POS38", "EA", "OA", "BETA", "SE", "LP")
 RETENTION_WARNING = 0.5
@@ -166,12 +167,19 @@ def apply_configured_exclusions(df: pd.DataFrame, config: dict[str, Any], qc: di
         if not path.exists() or key not in out.columns:
             qc["warnings"].append(f"exclusion skipped: {path} key={key}")
             continue
-        excluded = read_table(path, delimiter=item.get("delimiter", "\t"))
-        if key not in excluded.columns:
-            qc["warnings"].append(f"exclusion key not found in {path}: {key}")
-            continue
         before = len(out)
-        out = out[~out[key].astype(str).isin(set(excluded[key].astype(str)))]
+        if item.get("index"):
+            index = gwas_lookup.get_index(path, key, item.get("delimiter", "\t"))
+            if index is None:
+                qc["warnings"].append(f"exclusion key not found in {path}: {key}")
+                continue
+            out = out[~index.contains(out[key])]
+        else:
+            excluded = read_table(path, delimiter=item.get("delimiter", "\t"))
+            if key not in excluded.columns:
+                qc["warnings"].append(f"exclusion key not found in {path}: {key}")
+                continue
+            out = out[~out[key].astype(str).isin(set(excluded[key].astype(str)))]
         qc.setdefault("exclusions", []).append({"file": str(path), "key": key, "removed": before - len(out)})
     return out.reset_index(drop=True)
 
@@ -187,18 +195,33 @@ def apply_configured_joins(df: pd.DataFrame, config: dict[str, Any], qc: dict[st
         if not path.exists() or not left_on or left_on not in out.columns:
             qc["warnings"].append(f"join skipped: {path}")
             continue
-        join_df = read_table(path, delimiter=item.get("delimiter", "\t"))
-        if right_on not in join_df.columns:
-            qc["warnings"].append(f"join key not found in {path}: {right_on}")
-            continue
-        duplicates = int(join_df.duplicated(subset=[right_on]).sum())
-        if duplicates:
-            join_df = join_df.drop_duplicates(subset=[right_on], keep="first")
-            qc["warnings"].append(f"join file {path} had {duplicates} duplicate {right_on} keys; kept the first of each")
+        indexed = bool(item.get("index"))
+        if indexed:
+            index = gwas_lookup.get_index(path, right_on, item.get("delimiter", "\t"))
+            if index is None:
+                qc["warnings"].append(f"join key not found in {path}: {right_on}")
+                continue
+            join_df = index.fetch(out[left_on], item.get("columns"))
+            if pd.api.types.is_numeric_dtype(out[left_on]):  # the index keeps keys as text
+                join_df[right_on] = pd.to_numeric(join_df[right_on], errors="coerce")
+            duplicates = int(index.meta.get("duplicate_keys", 0))
+            if duplicates:
+                qc["warnings"].append(f"join file {path} had {duplicates} duplicate {right_on} keys; kept the first of each")
+        else:
+            join_df = read_table(path, delimiter=item.get("delimiter", "\t"))
+            if right_on not in join_df.columns:
+                qc["warnings"].append(f"join key not found in {path}: {right_on}")
+                continue
+            if item.get("columns"):
+                join_df = join_df[[right_on] + [c for c in item["columns"] if c != right_on and c in join_df.columns]]
+            duplicates = int(join_df.duplicated(subset=[right_on]).sum())
+            if duplicates:
+                join_df = join_df.drop_duplicates(subset=[right_on], keep="first")
+                qc["warnings"].append(f"join file {path} had {duplicates} duplicate {right_on} keys; kept the first of each")
         before_cols, before_rows = set(out.columns), int(len(out))
         out = pd.merge(out, join_df, how=item.get("how", "left"), left_on=left_on, right_on=right_on, suffixes=("", "_join"))
         qc.setdefault("joins", []).append({"file": str(path), "left_on": left_on, "right_on": right_on,
-                                           "added_columns": sorted(set(out.columns) - before_cols),
+                                           "indexed": indexed, "added_columns": sorted(set(out.columns) - before_cols),
                                            "rows_before": before_rows, "rows_after": int(len(out))})
     return out.reset_index(drop=True)
 
@@ -336,6 +359,28 @@ def normalize_variant_identifiers(out: pd.DataFrame, qc: dict[str, Any]) -> pd.D
     return out
 
 
+def take_multiallelic_other_allele(out: pd.DataFrame, marker: str, qc: dict[str, Any]) -> pd.DataFrame:
+    """Rows whose other allele is `marker` (deCODE writes `!`) were tested for the effect allele against every other
+    allele combined, so the file names no single other allele. Where the variant ID (SNPID, chrom:pos:allele:allele) has
+    the effect allele and 1 other allele, that allele becomes the other allele and the row is marked MA (INFO/MA in the
+    VCF). Rows whose ID gives no other allele keep the marker and are removed with the invalid alleles."""
+    ea, oa = np.asarray(upper_alleles(out["EA"]), dtype=object), np.asarray(upper_alleles(out["OA"]), dtype=object)
+    marked = oa == marker
+    counts = {"marked": int(marked.sum()), "other_allele_from_id": 0}
+    if marked.any():
+        parts = out["SNPID"].fillna("").astype(str).str.rsplit(":", n=2, expand=True)
+        if parts.shape[1] == 3:
+            first, second = parts[1].fillna("").str.upper().to_numpy(), parts[2].fillna("").str.upper().to_numpy()
+            from_second = marked & (ea == first) & (second != "") & (second != ea)
+            from_first = marked & ~from_second & (ea == second) & (first != "") & (first != ea)
+            taken = from_second | from_first
+            out.loc[out.index[taken], "OA"] = np.where(from_second, second, first)[taken]
+            out.loc[out.index[taken], "MA"] = True
+            counts["other_allele_from_id"] = int(taken.sum())
+    qc["multiallelic"] = counts
+    return out
+
+
 def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[str, Any], qc: dict[str, Any],
                     negate_log10p: bool | None = None, derive_oa: bool | None = None) -> pd.DataFrame:
     """Canonical columns from the source columns. `negate_log10p` and `derive_oa` fix decisions that otherwise
@@ -367,6 +412,11 @@ def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[
         use = derived != ""
         out.loc[use, "OA"] = derived[use]
         qc["derived_oa_from_ref_alt"] = True
+
+    out["MA"] = False
+    marker = str((config.get("multiallelic") or {}).get("marker") or "").strip().upper()
+    if marker:
+        out = take_multiallelic_other_allele(out, marker, qc)
 
     derivations = {"beta_from_or": 0, "se_from_ci": 0, "se_from_p": 0}
     from_or = ~np.isfinite(out["BETA"]) & np.isfinite(out["OR"]) & (out["OR"] > 0)
@@ -1012,7 +1062,8 @@ def merge_pieces(parts: list[Path], work: Path, vcf_path: Path, record: dict[str
     qc["qc_flags"] = qc_flags(qc, fields)
     reference = fasta.path.name if fasta is not None else "GRCh38"
     header.write_text("\n".join(gwas_vcf.table_header(record, decisions["extras"], decisions["format_keys"], fields,
-                                                       reference, qc.get("settings_hash", ""))) + "\n", encoding="utf-8")
+                                                       reference, qc.get("settings_hash", ""),
+                                                       multiallelic=bool((qc.get("multiallelic") or {}).get("other_allele_from_id")))) + "\n", encoding="utf-8")
     timings["sort_merge_deduplicate"] = time.perf_counter() - started
     started = time.perf_counter()
     gwas_vcf.bgzip_and_index([header, body], vcf_path)
@@ -1204,6 +1255,20 @@ def detect_build_from_head(head: pd.DataFrame, settings: dict[str, Any], qc: dic
     return build
 
 
+def build_configured_indexes(config: dict[str, Any]) -> None:
+    """Build the lookup index of every join and exclude file marked `index: true` before the pieces start, so the
+    pieces (and workers) only read it."""
+    exclusion = config.get("exclude") or config.get("exclusions") or []
+    items = [(item, item.get("key", "SNP")) for item in (exclusion if isinstance(exclusion, list) else [exclusion])
+             if isinstance(item, dict)]
+    items += [(item, item.get("right_on", item.get("on"))) for item in config.get("joins", []) or [] if isinstance(item, dict)]
+    for item, key in items:
+        if item.get("index") and item.get("file") and key:
+            path = resolve_config_path(str(item["file"]), config)
+            if path.exists():
+                gwas_lookup.ensure_index(path, key, item.get("delimiter", "\t"))
+
+
 def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], config: dict[str, Any], reference_root: str,
                       fasta: Any, qc: dict[str, Any], population: str = "ALL", population_used: str = "",
                       workers: int = 1) -> None:
@@ -1211,6 +1276,7 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
     vcf_input = use_vcf_reader(raw_path, config)
     chunk_rows = table_chunk_rows(config)
     tolerance = float(config.get("palindromic_tolerance", alleles.PALINDROMIC_TOLERANCE))
+    build_configured_indexes(config)
     settings = {"config": config, "record": record, "reference_root": reference_root, "population": population,
                 "palindromic_tolerance": tolerance, "afs_label": f"1000G_{population_used or population}"}
     if vcf_input:

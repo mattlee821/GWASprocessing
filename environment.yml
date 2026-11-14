@@ -22,6 +22,8 @@ dependencies:
   # gwas_alleles.orient_to_reference copies explicitly
   - pandas>=2.2,<3
   - pyyaml>=6,<7
+  # indexed copies of large files that a study YAML joins or excludes by (`index: true`)
+  - pyarrow>=14
   - requests>=2.28,<3
   - matplotlib-base>=3.6,<4
   - certifi

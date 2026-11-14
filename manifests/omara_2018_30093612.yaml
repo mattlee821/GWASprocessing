@@ -53,16 +53,28 @@ ncontrol: 108979
 #   strip_hash_header: true        # read a header line that starts with #
 #   derive_oa_from_ref_alt: true   # plink files with REF, ALT and A1 but no other-allele column
 
-# Add columns from another file (for example an rsID map), matched on a key column.
+# Add columns from another file (for example an rsID map), matched on a key column. A column the file shares with the
+# GWAS keeps its name in the GWAS and gets the suffix _join in the joined file (OA: otherAllele_join). `how` is left
+# (keep every row) or inner (keep rows with a match). `index: true` builds a lookup beside a very large file once, so
+# each piece of the GWAS reads only its own rows instead of the whole file; keys are compared as text.
 # joins:
 #   - file: "${GWAS_WORK_ROOT}/omara_2018_30093612/docs/rsid_map.tsv"
 #     on: variant_id
 #     how: left
+#     index: false
+#     columns: [rsid, gene]      # optional: join only these columns (the key is always joined)
 
-# Remove rows listed in another file.
+# Remove rows listed in another file (`index: true` as for joins).
 # exclude:
 #   file: "${GWAS_WORK_ROOT}/omara_2018_30093612/docs/excluded.txt"
 #   key: variant_id
+#   index: false
+
+# Studies that write a marker instead of the other allele at multiallelic sites (deCODE writes "!": the effect allele was
+# tested against every other allele combined). Where the variant ID (SNPID: chrom:pos:allele:allele) names the effect
+# allele and 1 other allele, that allele is used and the record carries INFO/MA; other marked rows are removed.
+# multiallelic:
+#   marker: "!"
 
 # Multi-sample GWAS-VCF: the sample (GWAS) to read.
 # sample: ebi-a-GCST006464

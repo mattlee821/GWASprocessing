@@ -10,10 +10,13 @@ The row JSON comes from prepare_manifest.py, so manifest text never passes throu
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
+import re
 import shutil
 from pathlib import Path
 
-from download_gwas_catalog import download_gwas_catalog, verify_gzip
+from download_gwas_catalog import download_gwas_catalog, md5, verify_gzip
 from download_opengwas import download_opengwas
 from gwas_pipeline_common import (
     MANIFEST_COLUMNS,
@@ -42,6 +45,52 @@ def copy_local(location: str, raw_dir: Path) -> Path:
         shutil.copy2(src, tmp)
         tmp.replace(dest)
     return dest
+
+
+def md5_sidecar(path: Path) -> Path | None:
+    """The checksum file beside a local file: <name>.md5sum or <name>.md5, or the same with .gz taken off the name
+    (deCODE ships X.txt.md5sum for X.txt.gz)."""
+    names = [path.name] + ([path.name[:-3]] if path.name.endswith(".gz") else [])
+    for name in names:
+        for suffix in (".md5sum", ".md5"):
+            candidate = path.with_name(name + suffix)
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def verify_local_md5(path: Path) -> dict:
+    """Check a local file against its checksum file, when it has one. The checksum may be of the file as it is or, for
+    a .gz, of the text inside it (deCODE's md5sum is of the uncompressed file). A file without a checksum file is
+    not checked here (the gzip check covers it)."""
+    sidecar = md5_sidecar(path)
+    if sidecar is None:
+        return {"checked": False, "ok": False}
+    stems = {path.name, path.name[:-3] if path.name.endswith(".gz") else path.name}
+    lines = [line.split() for line in sidecar.read_text(errors="replace").splitlines() if line.strip()]
+    expected = None
+    for parts in lines:
+        found = re.fullmatch(r"[a-fA-F0-9]{32}", parts[0])
+        if found and (len(lines) == 1 or len(parts) == 1 or Path(parts[-1].lstrip("*")).name in stems):
+            expected = parts[0].lower()
+            break
+    result: dict = {"checked": True, "ok": False, "sidecar": sidecar.name, "expected": expected}
+    if expected is None:
+        result["error"] = f"no md5 for {path.name} found in {sidecar.name}"
+        return result
+    if md5(path) == expected:
+        return {**result, "ok": True, "matched": "file"}
+    if path.name.endswith(".gz"):
+        digest = hashlib.md5()
+        try:
+            with gzip.open(path, "rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+        except Exception as exc:
+            return {**result, "error": f"gzip error: {exc}"}
+        if digest.hexdigest() == expected:
+            return {**result, "ok": True, "matched": "uncompressed"}
+    return result
 
 
 def checked_download(fetch, metadata: dict) -> Path:
@@ -96,7 +145,17 @@ def main() -> None:
     elif source_type == "direct_url":
         raw_path = checked_download(lambda: download_url(location, raw_dir), metadata)
     elif source_type == "local":
+        source = Path(location.replace("file://", ""))
+        if not source.exists():
+            raise FileNotFoundError(f"Local GWAS file not found: {source}")
+        metadata["md5"] = verify_local_md5(source)
+        if metadata["md5"]["checked"] and not metadata["md5"]["ok"]:
+            raise data_error(f"MD5 check failed for {source}: {metadata['md5'].get('error') or 'the file does not match ' + metadata['md5']['sidecar']}")
         raw_path = copy_local(location, raw_dir)
+        if not metadata["md5"]["checked"]:
+            metadata["gzip"] = verify_gzip(raw_path)
+            if metadata["gzip"].get("checked") and not metadata["gzip"].get("ok"):
+                raise data_error(f"gzip integrity check failed for {source}: {metadata['gzip'].get('error', '')}")
     else:
         raise data_error(f"Unsupported source_type '{source_type}' for {location}")
 

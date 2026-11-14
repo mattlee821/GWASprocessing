@@ -11,6 +11,7 @@ Positions are given in GRCh38 with input_build hg38 and an empty reference, so n
 
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -135,6 +136,104 @@ class Step02ReadTest(unittest.TestCase):
             mapped = self.run_hg38(raw, "estimate_mapped", study_yaml=str(yaml_path))
             self.assertEqual(mapped.returncode, 0, mapped.stderr)
             self.assertEqual((mapped.qc["source_columns"]["BETA"], mapped.rows[0]["FORMAT"]["ES"]), ("Estimate", "0.1"))
+
+        with self.subTest("A YAML joins: block adds columns from another file, and exclude: drops the rows it lists"):
+            header = ["Chrom", "Pos", "Name", "rsids", "effectAllele", "otherAllele", "Beta", "Pval", "SE", "N"]
+            raw = write_table(self.tmp / "protein.tsv", header, [
+                ["chr1", 1100, "n1", "rs11", "A", "A", 0.1, 0.01, 0.02, 5000],     # kept: other allele and frequency from the join
+                ["chr1", 1200, "n2", "rs12", "A", "G", 0.1, 0.01, 0.02, 5000],     # listed in the excluded file
+                ["chr1", 1300, "n3", "rs13", "A", "G", 0.1, 0.01, 0.02, 5000],     # joined other allele '!' (no single other allele)
+                ["chr1", 1400, "n4", "rs14", "A", "G", 0.1, 0.01, 0.02, 5000],     # no match in the joined file
+                ["chr1", 1500, "n5", "rs15", "C", "T", 0.2, 0.02, 0.02, 5000]])
+            write_table(self.tmp / "annotated.tsv", ["Chrom", "Pos", "Name", "rsids", "effectAllele", "otherAllele", "effectAlleleFreq"], [
+                ["chr1", 1100, "n1", "rs11", "A", "G", 0.31], ["chr1", 1300, "n3", "rs13", "A", "!", 0.32],
+                ["chr1", 1500, "n5", "rs15", "C", "T", 0.33], ["chr1", 1200, "n2", "rs12", "A", "G", 0.34]])
+            write_table(self.tmp / "excluded.tsv", ["Chrom", "Pos", "Name"], [["chr1", 1200, "n2"]])
+            yaml_path = self.write_text("protein.yaml", f"""columns:
+  CHR: Chrom
+  POS: Pos
+  SNPID: Name
+  SNP: rsids
+  EA: effectAllele
+  OA: otherAllele_join
+  EAF: effectAlleleFreq
+  BETA: Beta
+  SE: SE
+  P: Pval
+  N: N
+exclude:
+  file: {self.tmp / "excluded.tsv"}
+  key: Name
+joins:
+  - file: {self.tmp / "annotated.tsv"}
+    on: Name
+    how: inner
+""")
+            result = self.run_hg38(raw, "protein", study_yaml=str(yaml_path))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.qc["exclusions"][0]["removed"], 1)
+            self.assertEqual((result.qc["joins"][0]["rows_before"], result.qc["joins"][0]["rows_after"]), (4, 3))
+            self.assertIn("otherAllele_join", result.qc["joins"][0]["added_columns"])  # the joined file's name clashes, so it gets _join
+            self.assertEqual(result.qc["output_rows"], 2)  # n1 and n5; n3's '!' is not an allele
+            first = result.rows[0]
+            self.assertEqual((first["POS"], first["REF"], first["ALT"], first["FORMAT"]["AF"]), (1100, "G", "A", "0.31"))
+
+        with self.subTest("index: true reads a join or exclude file once into a lookup beside it, with the same result"):
+            indexed_yaml = self.write_text("protein_indexed.yaml", yaml_path.read_text(encoding="utf-8")
+                                           .replace("  key: Name\n", "  key: Name\n  index: true\n")
+                                           .replace("    how: inner\n", "    how: inner\n    index: true\n    columns: [otherAllele, effectAlleleFreq]\n"))
+            pieces = {**os.environ, "GWAS_TABLE_CHUNK": "2"}  # 3 pieces, each looking up its own rows
+            indexed = self.run_hg38(raw, "protein_indexed", study_yaml=str(indexed_yaml), env=pieces)
+            self.assertEqual(indexed.returncode, 0, indexed.stderr)
+            self.assertTrue((self.tmp / "annotated.tsv.index" / "meta.json").exists())
+            self.assertTrue((self.tmp / "excluded.tsv.index" / "meta.json").exists())
+            self.assertEqual(indexed.qc["output_rows"], 2)
+            self.assertEqual(sum(j["rows_after"] for j in indexed.qc["joins"]), 3)
+            self.assertTrue(all(j["indexed"] for j in indexed.qc["joins"]))
+            self.assertEqual(indexed.qc["joins"][0]["added_columns"], ["effectAlleleFreq", "otherAllele_join"])  # columns: limits the join
+            self.assertEqual((indexed.rows[0]["POS"], indexed.rows[0]["REF"], indexed.rows[0]["ALT"], indexed.rows[0]["FORMAT"]["AF"]),
+                             (1100, "G", "A", "0.31"))
+            built = (self.tmp / "annotated.tsv.index" / "meta.json").stat().st_mtime_ns
+            again = self.run_hg38(raw, "protein_indexed_again", study_yaml=str(indexed_yaml))
+            self.assertEqual((again.returncode, (self.tmp / "annotated.tsv.index" / "meta.json").stat().st_mtime_ns), (0, built))
+            annotated = self.tmp / "annotated.tsv"
+            annotated.write_text(annotated.read_text(encoding="utf-8").replace("0.31", "0.555"), encoding="utf-8")
+            rebuilt = self.run_hg38(raw, "protein_rebuilt", study_yaml=str(indexed_yaml))
+            self.assertEqual((rebuilt.returncode, rebuilt.rows[0]["FORMAT"]["AF"]), (0, "0.555"))  # the changed file was indexed again
+
+        with self.subTest("multiallelic: marks rows whose other allele is a marker, taking the other allele from the variant ID"):
+            raw = write_table(self.tmp / "multiallelic.tsv", ["Chrom", "Pos", "Name", "effectAllele", "otherAllele", "Beta", "Pval", "SE", "N", "EAF"], [
+                ["chr1", 1100, "chr1:1100:A:G", "A", "!", 0.1, 0.01, 0.02, 5000, 0.3],   # ID lists the effect allele, then the other
+                ["chr1", 1200, "chr1:1200:G:A", "A", "!", 0.1, 0.01, 0.02, 5000, 0.3],   # ID lists the other allele first
+                ["chr1", 1300, "chr1:1300:A:A", "A", "!", 0.1, 0.01, 0.02, 5000, 0.3],   # ID repeats the effect allele: no other allele
+                ["chr1", 1400, "chr1:1400:C:T", "C", "T", 0.2, 0.02, 0.02, 5000, 0.4]])  # an ordinary row
+            columns = """columns:
+  CHR: Chrom
+  POS: Pos
+  SNPID: Name
+  EA: effectAllele
+  OA: otherAllele
+  EAF: EAF
+  BETA: Beta
+  SE: SE
+  P: Pval
+  N: N
+"""
+            marked = self.run_hg38(raw, "multiallelic", study_yaml=str(self.write_text("multiallelic.yaml", columns + 'multiallelic:\n  marker: "!"\n')))
+            self.assertEqual(marked.returncode, 0, marked.stderr)
+            self.assertEqual(marked.qc["multiallelic"], {"marked": 3, "other_allele_from_id": 2})
+            records = marked.by_snpid()
+            self.assertEqual(sorted(records), ["chr1:1100:A:G", "chr1:1200:G:A", "chr1:1400:C:T"])  # the row with no other allele is removed
+            self.assertEqual([(r["REF"], r["ALT"]) for r in (records["chr1:1100:A:G"], records["chr1:1200:G:A"])], [("G", "A"), ("G", "A")])
+            self.assertEqual([r["line"].split("\t")[7].endswith(";MA") for r in records.values()], [True, True, False])
+            self.assertTrue(any(line.startswith("##INFO=<ID=MA,Number=0,Type=Flag") for line in marked.header))
+            plain = self.run_hg38(raw, "multiallelic_off", study_yaml=str(self.write_text("multiallelic_off.yaml", columns)))
+            self.assertEqual(plain.qc["output_rows"], 1)  # without the setting, '!' is not an allele
+            self.assertFalse(any("ID=MA," in line for line in plain.header))
+
+        with self.subTest("YAML read as YAML 1.2: an unquoted on: key stays a key, and yes, no and off stay text"):
+            parsed = common.load_yaml(self.write_text("yaml12.yaml", "joins:\n  - on: Name\nnote: off\nflag: true\n"))
+            self.assertEqual((parsed["joins"], parsed["note"], parsed["flag"]), ([{"on": "Name"}], "off", True))
 
         # --- Allele families ------------------------------------------------------------------------------------
         family_header = ["chromosome", "base_pair_location", "variant_id", "effect_allele", "other_allele", "beta",

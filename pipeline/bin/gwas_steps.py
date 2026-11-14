@@ -99,6 +99,11 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
     notes = [f"{CAUSE_TEXT[c]}: {_rare_note(causes[c])}" for c in COORDINATE_CAUSES if c in causes]
     if lift_detail and "liftover_to_grch38_failed" in causes:
         notes.append(f"liftover failures: {lift_detail}")
+    multi = qc.get("multiallelic", {}) or {}
+    if _n(multi.get("marked")):
+        notes.append(f"multiallelic marker in the other-allele column: {_n(multi.get('marked')):,} rows; other allele taken from the "
+                     f"variant ID and the row marked INFO/MA: {_n(multi.get('other_allele_from_id')):,}; no other allele in the ID "
+                     f"(removed as invalid alleles): {_n(multi.get('marked')) - _n(multi.get('other_allele_from_id')):,}")
     build = qc.get("build_detection", {}) or {}
     if build.get("build"):
         notes.append(f"input build: {build.get('build')} ({build.get('method', '')})")
