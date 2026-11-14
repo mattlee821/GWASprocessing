@@ -104,6 +104,14 @@ def build_steps(qc: dict[str, Any]) -> list[dict[str, Any]]:
         notes.append(f"multiallelic marker in the other-allele column: {_n(multi.get('marked')):,} rows; other allele taken from the "
                      f"variant ID and the row marked INFO/MA: {_n(multi.get('other_allele_from_id')):,}; no other allele in the ID "
                      f"(removed as invalid alleles): {_n(multi.get('marked')) - _n(multi.get('other_allele_from_id')):,}")
+    codes = qc.get("indel_codes", {}) or {}
+    if _n(codes.get("coded_rows")):
+        notes.append(f"indels coded as I/D with no sequence: {_n(codes.get('coded_rows')):,} rows; alleles and GRCh38 position taken from "
+                     f"dbSNP by rsID and the row marked INFO/IR: {_n(codes.get('recovered')):,} "
+                     f"({_n(codes.get('recovered_via_merged_rsid')):,} through a merged rsID); not recovered (removed as invalid "
+                     f"alleles): no rsID {_n(codes.get('no_rsid')):,}, rsID not an indel in dbSNP {_n(codes.get('not_in_dbsnp')):,}, "
+                     f"more than 1 dbSNP indel for the rsID {_n(codes.get('ambiguous_in_dbsnp')):,}, not a simple indel "
+                     f"{_n(codes.get('not_a_simple_indel')):,}, chromosome differs {_n(codes.get('chromosome_conflict')):,}")
     build = qc.get("build_detection", {}) or {}
     if build.get("build"):
         notes.append(f"input build: {build.get('build')} ({build.get('method', '')})")

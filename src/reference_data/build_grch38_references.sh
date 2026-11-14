@@ -49,6 +49,8 @@ done < "${REFERENCE_SCRIPT_DIR}/1000genomes_grch38_urls.tsv"
 
 "${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_index.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --dbsnp "${RAW}/dbsnp/GCF_000001405.40.gz" \
   --assembly-report "${RAW}/dbsnp/GCF_000001405.40_assembly_report.txt" --out "${GWAS_REFERENCE_ROOT}/dbsnp/GRCh38"
+"${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_indels.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --dbsnp "${RAW}/dbsnp/GCF_000001405.40.gz" \
+  --assembly-report "${RAW}/dbsnp/GCF_000001405.40_assembly_report.txt" --out "${GWAS_REFERENCE_ROOT}/dbsnp/GRCh38/indels"
 "${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_dbsnp_merges.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --merged "${RAW}/dbsnp/refsnp-merged.json.bz2" \
   --out "${GWAS_REFERENCE_ROOT}/dbsnp/GRCh38"
 "${PYTHON}" "${REFERENCE_SCRIPT_DIR}/build_1000genomes_grch38.py" ${FORCE_FLAG[@]+"${FORCE_FLAG[@]}"} --raw "${RAW}/1000genomes_hg38" \

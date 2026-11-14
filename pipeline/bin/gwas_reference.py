@@ -6,6 +6,8 @@ build_1000genomes_grch38.py), so a process holds only the pages it touches. Keep
 read at random positions.
 
     <root>/dbsnp/GRCh38/          chr<C>.{pos,hash,rs}.u32 sorted by position; rs.u32 + rs_chrom.u8 + rs_pos.u32
+    <root>/dbsnp/GRCh38/indels/   the alleles of every dbSNP insertion and deletion, by rsID (build_dbsnp_indels.py), to
+                                  give sequences to studies that report indels as I/D codes
     <root>/1000genomes/GRCh38/    <POP>.{key.i64,ref.u1,alt.u1,af.f4}: biallelic-split SNVs, sorted by key
     <root>/build_detection/       grch37.key.i64 / grch38.key.i64 (+ .ref.u1/.alt.u1): the same SNPs in both builds
 
@@ -181,6 +183,55 @@ class Dbsnp:
                 match = np.asarray(db_hash[at]) == wanted[rows[todo]]
                 out[rows[todo][match]] = np.asarray(db_rs[at[match]], dtype="int64")
         return out
+
+
+class DbsnpIndels:
+    """The REF and ALT sequences of dbSNP indels (GRCh38), found by rsID. Used for studies that code an indel as I/D (or
+    similar) with no sequence: the rsID gives the variant, and dbSNP gives its alleles.
+
+    Files (rows sorted by rsID): rs.u32, chrom.u8, pos.u32, off.u64 (n + 1 offsets into alleles.bin), alleles.bin (the
+    text "REF>ALT" of each row, joined with no separator), meta.json."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root)
+        self.meta = json.loads((self.root / "meta.json").read_text(encoding="utf-8"))
+        self.rs = _memmap(self.root / "rs.u32", "<u4")
+        self.chrom = _memmap(self.root / "chrom.u8", "u1")
+        self.pos = _memmap(self.root / "pos.u32", "<u4")
+        self.off = _memmap(self.root / "off.u64", "<u8")
+        self.blob = np.memmap(self.root / "alleles.bin", dtype="u1", mode="r") if (self.root / "alleles.bin").stat().st_size else np.zeros(0, dtype="u1")
+        self._coarse = coarse_index(self.rs)
+
+    @classmethod
+    def find(cls, reference_root: str | Path) -> "DbsnpIndels | None":
+        root = Path(reference_root) / "dbsnp" / "GRCh38" / "indels"
+        return cls(root) if (root / "meta.json").exists() else None
+
+    def lookup(self, rs_numbers: np.ndarray) -> dict[str, np.ndarray]:
+        """For each rsID number: how many different indel records dbSNP has for it (`n`), and, when there is exactly 1,
+        its chromosome code, position, REF and ALT (0, 0, "" and "" otherwise)."""
+        rs_numbers = np.asarray(rs_numbers, dtype="int64")
+        n = np.zeros(len(rs_numbers), dtype="int64")
+        code = np.zeros(len(rs_numbers), dtype="int64")
+        pos = np.zeros(len(rs_numbers), dtype="int64")
+        ref = np.full(len(rs_numbers), "", dtype=object)
+        alt = np.full(len(rs_numbers), "", dtype=object)
+        valid = (rs_numbers > 0) & (rs_numbers < 2 ** 32)
+        if not valid.any() or not len(self.rs):
+            return {"n": n, "chrom": code, "pos": pos, "ref": ref, "alt": alt}
+        query = rs_numbers[valid].astype("uint32")
+        lo = searchsorted_blocked(self.rs, self._coarse, query, "left")
+        hi = searchsorted_blocked(self.rs, self._coarse, query, "right")
+        rows = np.where(valid)[0]
+        n[rows] = hi - lo
+        single = rows[(hi - lo) == 1]
+        at = lo[(hi - lo) == 1]
+        code[single] = np.asarray(self.chrom[at], dtype="int64")
+        pos[single] = np.asarray(self.pos[at], dtype="int64")
+        for row, i in zip(single, at):
+            text = bytes(self.blob[int(self.off[i]):int(self.off[i + 1])]).decode("ascii")
+            ref[row], alt[row] = text.split(">", 1)
+        return {"n": n, "chrom": code, "pos": pos, "ref": ref, "alt": alt}
 
 
 class Frequencies:

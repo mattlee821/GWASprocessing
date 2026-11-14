@@ -105,7 +105,7 @@ FIELD_ALIASES = {
 FAMILY_FIELDS = ("EA", "OA", "BETA", "EAF", "OR", "CI_LOWER", "CI_UPPER", "CHR", "POS")
 KNOWN_CONFIG_KEYS = {"description", "input_build", "delimiter", "columns", "exclude", "exclusions", "joins",
                      "transforms", "extras", "format", "reference_population", "palindromic_tolerance", "sample",
-                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "multiallelic", "qc_skip_flags", "_config_path"}
+                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "multiallelic", "indel_codes", "qc_skip_flags", "_config_path"}
 KNOWN_TRANSFORMS = {"strip_hash_header", "uppercase_alleles", "derive_oa_from_ref_alt"}
 REQUIRED_FIELDS = ("CHR", "POS38", "EA", "OA", "BETA", "SE", "LP")
 RETENTION_WARNING = 0.5
@@ -414,6 +414,7 @@ def build_canonical(df: pd.DataFrame, cols: dict[str, str | None], config: dict[
         qc["derived_oa_from_ref_alt"] = True
 
     out["MA"] = False
+    out["IR"] = False
     marker = str((config.get("multiallelic") or {}).get("marker") or "").strip().upper()
     if marker:
         out = take_multiallelic_other_allele(out, marker, qc)
@@ -515,6 +516,78 @@ def resolve_input_build(out: pd.DataFrame, record: dict[str, Any], config: dict[
         )
     qc["build_detection"].update({"build": declared, "method": "declared"})
     return declared
+
+
+def recover_indel_codes(out: pd.DataFrame, config: dict[str, Any], indels: Any, dbsnp: Any, qc: dict[str, Any]) -> pd.DataFrame:
+    """Give the sequences of indels that a study reports as codes (Pietzner: D and I), from dbSNP.
+
+    `indel_codes: {deletion: D, insertion: I}` in the study YAML names the 2 codes. A row whose effect and other alleles are
+    the 2 codes and that has an rsID gets, from the dbSNP indel table, the GRCh38 chromosome, position and alleles of
+    that rsID (an rsID that dbSNP has merged is looked up under its current rsID): the shorter allele is the deletion,
+    the longer the insertion, and the effect allele is the one the study's code names. Only an rsID with exactly 1 simple
+    indel record in dbSNP (1 allele is the other with bases added) is recovered; the rest are left as they were and are
+    removed later as invalid alleles. Recovered rows are marked INFO/IR, and QC counts every outcome."""
+    spec = config.get("indel_codes") or {}
+    deletion, insertion = str(spec.get("deletion") or "").strip().upper(), str(spec.get("insertion") or "").strip().upper()
+    if not deletion or not insertion or deletion == insertion:
+        return out
+    ea, oa = upper_alleles(out["EA"]), upper_alleles(out["OA"])
+    ea_is_deletion = ((ea == deletion) & (oa == insertion)).to_numpy(dtype=bool)
+    ea_is_insertion = ((ea == insertion) & (oa == deletion)).to_numpy(dtype=bool)
+    coded = ea_is_deletion | ea_is_insertion
+    counts = qc.setdefault("indel_codes", {})
+    for key in ("coded_rows", "recovered", "recovered_via_merged_rsid", "no_rsid", "not_in_dbsnp", "ambiguous_in_dbsnp",
+                "not_a_simple_indel", "chromosome_conflict"):
+        counts.setdefault(key, 0)
+    if not coded.any():
+        return out
+    if indels is None:
+        raise config_error("The study YAML has `indel_codes`, which needs the dbSNP indel table: run bash src/source.sh "
+                           "(src/reference_data/build_dbsnp_indels.py) to build it")
+    counts["coded_rows"] += int(coded.sum())
+    index = out.index[coded]
+    snp = out.loc[index, "SNP"].astype("string")
+    has_rs = snp.str.match(r"^rs\d+$").fillna(False).to_numpy(dtype=bool)
+    counts["no_rsid"] += int((~has_rs).sum())
+    numbers = np.zeros(len(index), dtype="int64")
+    numbers[has_rs] = np.asarray(coords.rs_number(snp[has_rs]), dtype="int64")
+    found = indels.lookup(numbers)
+    via_merge = np.zeros(len(index), dtype=bool)
+    absent = np.where(has_rs & (found["n"] == 0))[0]
+    if len(absent) and dbsnp is not None and dbsnp.has_merges:
+        current = dbsnp.current_rsids(numbers[absent])
+        retry = absent[current > 0]
+        if len(retry):
+            again = indels.lookup(current[current > 0])
+            for key in found:
+                found[key][retry] = again[key]
+            via_merge[retry] = again["n"] == 1
+    n, code, pos, ref, alt = found["n"], found["chrom"], found["pos"], found["ref"], found["alt"]
+    ref_len = np.fromiter((len(x) for x in ref), dtype="int64", count=len(ref))
+    alt_len = np.fromiter((len(x) for x in alt), dtype="int64", count=len(alt))
+    simple = np.array([bool(r) and bool(a) and (r.startswith(a) or a.startswith(r)) for r, a in zip(ref, alt)], dtype=bool)
+    chrom = np.array([grch38.CHROMS[c - 1] if c > 0 else "" for c in code], dtype=object)
+    given = out.loc[index, "CHR"]
+    chrom_ok = given.isna().to_numpy() | (given.astype(str).to_numpy() == chrom)
+    counts["not_in_dbsnp"] += int((has_rs & (n == 0)).sum())
+    counts["ambiguous_in_dbsnp"] += int((has_rs & (n > 1)).sum())
+    one = has_rs & (n == 1)
+    counts["not_a_simple_indel"] += int((one & ~simple).sum())
+    counts["chromosome_conflict"] += int((one & simple & ~chrom_ok).sum())
+    use = one & simple & chrom_ok
+    deletion_allele = np.where(ref_len < alt_len, ref, alt)
+    insertion_allele = np.where(ref_len < alt_len, alt, ref)
+    effect = np.where(ea_is_deletion[coded], deletion_allele, insertion_allele)
+    other = np.where(ea_is_deletion[coded], insertion_allele, deletion_allele)
+    rows = index[use]
+    out.loc[rows, "CHR"] = chrom[use]
+    out.loc[rows, "POS38"] = pos[use].astype("float64")
+    out.loc[rows, "EA"] = effect[use]
+    out.loc[rows, "OA"] = other[use]
+    out.loc[rows, "IR"] = True
+    counts["recovered"] += int(use.sum())
+    counts["recovered_via_merged_rsid"] += int((use & via_merge).sum())
+    return out
 
 
 def fill_coordinates_from_dbsnp(out: pd.DataFrame, dbsnp: Any, qc: dict[str, Any]) -> pd.DataFrame:
@@ -890,6 +963,7 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], fasta: Any, pa
     lap("positions_and_build")
     dbsnp, freqs, _ = grch38_references(reference_root, settings["population"])
     out = fill_coordinates_from_dbsnp(out, dbsnp, qc)
+    out = recover_indel_codes(out, config, grch38_indels(reference_root), dbsnp, qc)
     lap("rsid_coordinates")
     out = lift_to_grch38(out, reference_root, qc)
     lap("liftover")
@@ -1121,7 +1195,8 @@ def merge_pieces(parts: list[Path], ranks: list[list[int]], work: Path, vcf_path
     reference = fasta.path.name if fasta is not None else "GRCh38"
     header.write_text("\n".join(gwas_vcf.table_header(record, decisions["extras"], decisions["format_keys"], fields,
                                                        reference, qc.get("settings_hash", ""),
-                                                       multiallelic=bool((qc.get("multiallelic") or {}).get("other_allele_from_id")))) + "\n", encoding="utf-8")
+                                                       multiallelic=bool((qc.get("multiallelic") or {}).get("other_allele_from_id")),
+                                                       indel_recovered=bool((qc.get("indel_codes") or {}).get("recovered")))) + "\n", encoding="utf-8")
     timings["sort_merge_deduplicate"] = time.perf_counter() - started
     started = time.perf_counter()
     gwas_vcf.bgzip_and_index([header, *bodies], vcf_path, threads=threads)
@@ -1263,6 +1338,16 @@ def grch38_references(reference_root: str, population: str) -> tuple[Any, Any, A
         _GRCH38[key] = (grch38.Dbsnp.find(reference_root), grch38.Frequencies.find(reference_root, population),
                         grch38.paired_build_sample(reference_root))
     return _GRCH38[key]
+
+
+_INDELS: dict[str, Any] = {}
+
+
+def grch38_indels(reference_root: str) -> Any:
+    """The dbSNP indel allele table (None when not built), opened once per process."""
+    if str(reference_root) not in _INDELS:
+        _INDELS[str(reference_root)] = grch38.DbsnpIndels.find(reference_root)
+    return _INDELS[str(reference_root)]
 
 
 def _init_worker(reference_root: str, population: str, fasta_path: str) -> None:
