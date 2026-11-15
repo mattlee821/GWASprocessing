@@ -105,7 +105,7 @@ FIELD_ALIASES = {
 FAMILY_FIELDS = ("EA", "OA", "BETA", "EAF", "OR", "CI_LOWER", "CI_UPPER", "CHR", "POS")
 KNOWN_CONFIG_KEYS = {"description", "input_build", "delimiter", "columns", "exclude", "exclusions", "joins",
                      "transforms", "extras", "format", "reference_population", "palindromic_tolerance", "sample",
-                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "multiallelic", "_config_path"}
+                     "study_type", "ncase", "ncontrol", "sample_size", "gwas_catalog_file", "multiallelic", "qc_skip_flags", "_config_path"}
 KNOWN_TRANSFORMS = {"strip_hash_header", "uppercase_alleles", "derive_oa_from_ref_alt"}
 REQUIRED_FIELDS = ("CHR", "POS38", "EA", "OA", "BETA", "SE", "LP")
 RETENTION_WARNING = 0.5
@@ -1117,7 +1117,7 @@ def merge_pieces(parts: list[Path], ranks: list[list[int]], work: Path, vcf_path
     header = work / "header.vcf"
     fields = sample_fields(record, config, qc, decisions["format_keys"])
     qc["sample_header"] = fields
-    qc["qc_flags"] = qc_flags(qc, fields)
+    qc["qc_flags"] = qc_flags(qc, fields, config.get("qc_skip_flags") or [])
     reference = fasta.path.name if fasta is not None else "GRCh38"
     header.write_text("\n".join(gwas_vcf.table_header(record, decisions["extras"], decisions["format_keys"], fields,
                                                        reference, qc.get("settings_hash", ""),
@@ -1140,8 +1140,9 @@ FLAG_RULES = {
 }
 
 
-def qc_flags(qc: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
-    """{flag: description} for each OpenGWAS QC flag raised (LDSC and clumping flags are not computed)."""
+def qc_flags(qc: dict[str, Any], fields: dict[str, Any], skip: list[str] | None = None) -> dict[str, Any]:
+    """{flag: description} for each OpenGWAS QC flag raised (LDSC and clumping flags are not computed), except the flags
+    a study YAML lists in `qc_skip_flags` (a flag that does not apply to the study's design)."""
     metrics = qc.get("qc_metrics", {}) or {}
     r = (qc.get("af_concordance") or {}).get("pearson_r")
     lam = qc.get("lambda_gc")
@@ -1158,7 +1159,7 @@ def qc_flags(qc: dict[str, Any], fields: dict[str, Any]) -> dict[str, Any]:
         "mean_EFFECT_01": mean_effect is not None and abs(mean_effect) > 0.1,
         "n_p_sig": int(metrics.get("n_p_below_5e-8", 0)) > 1000,
     }
-    return {flag: FLAG_RULES[flag] for flag, on in raised.items() if on}
+    return {flag: FLAG_RULES[flag] for flag, on in raised.items() if on and flag not in (skip or [])}
 
 
 def _number(value: Any) -> float | None:
