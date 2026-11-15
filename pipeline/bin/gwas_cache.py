@@ -16,7 +16,7 @@ goes wrong (a missing file, a bucket being compacted, a full disk) is a cache mi
 the output never depends on the cache's contents. The fingerprint holds the reference files' names, sizes and times, so
 a rebuilt reference starts a new cache. `compact` merges a bucket's segments once it holds more than a few; it runs at
 the end of a GWAS and skips a bucket another job is already compacting. The segments it merges are renamed to
-`.old` and deleted a day later, because a job on another node may still have one memory-mapped and a deleted file
+`.old` and deleted 2 hours later, because a job on another node may still have one memory-mapped and a deleted file
 kills that job on a shared file system.
 
 GWAS_VARIANT_CACHE sets the cache root (default <reference root>/variant_cache); `off` switches the cache off.
@@ -45,7 +45,7 @@ except ImportError:  # the cache is then off
 BUCKETS = 64
 SHIFT = np.uint64(58)  # the top 6 bits of h1 pick the bucket
 COMPACT_AT = 8  # segments in a bucket before it is merged into 1
-OLD_AFTER = 24 * 3600  # seconds a merged-away segment is kept before it is deleted
+OLD_AFTER = 2 * 3600  # seconds a merged-away segment is kept before it is deleted (a job holds a segment for 1 piece)
 _counter = itertools.count()
 _OPEN: dict[tuple[str, str], "VariantCache | None"] = {}
 
