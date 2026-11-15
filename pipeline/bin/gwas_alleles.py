@@ -419,9 +419,11 @@ def align_table_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.Data
     return out[~np.isin(action, REMOVED_ACTIONS)], alignment_summary(action, fasta)
 
 
-def orient_to_reference(frame: pd.DataFrame, fasta: Fasta) -> tuple[pd.DataFrame, np.ndarray]:
-    """align_table_to_reference without dropping: every row, oriented, with its action ('drop' rows unchanged)."""
-    action = reference_alignment(frame["CHR"], frame["POS38"], frame["EA"], frame["OA"], fasta)["action"].to_numpy()
+def orient_to_reference(frame: pd.DataFrame, fasta: Fasta, action: np.ndarray | None = None) -> tuple[pd.DataFrame, np.ndarray]:
+    """align_table_to_reference without dropping: every row, oriented, with its action ('drop' rows unchanged).
+    `action` is each row's alignment action when it is already known (from the variant cache); else it is worked out."""
+    if action is None:
+        action = reference_alignment(frame["CHR"], frame["POS38"], frame["EA"], frame["OA"], fasta)["action"].to_numpy()
     out = frame.copy()
     complement = np.isin(action, ["complement", "complement_swap"])
     if complement.any():

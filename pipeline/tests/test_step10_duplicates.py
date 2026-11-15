@@ -27,7 +27,7 @@ HEADER = ["CHR", "POS38", "SNP", "EA", "OA", "EAF", "BETA", "SE", "P", "N"]
 GRCH38_CONTIG = "##contig=<ID=1,length=248956422,assembly=GRCh38>"
 # af_concordance is pooled from moments (compared to 12 places); build detection samples the first piece only, so its hit
 # counts differ with tiny pieces while the build decision must not.
-VOLATILE_QC = {"started_at", "completed_at", "table_pieces", "settings_hash", "provenance", "af_concordance", "build_detection",
+VOLATILE_QC = {"variant_cache", "started_at", "completed_at", "table_pieces", "settings_hash", "provenance", "af_concordance", "build_detection",
                "timings_s"}
 
 

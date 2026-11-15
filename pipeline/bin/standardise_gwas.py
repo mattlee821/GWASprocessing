@@ -37,6 +37,7 @@ import numpy as np
 import pandas as pd
 
 import gwas_alleles as alleles
+import gwas_cache
 import gwas_coordinates as coords
 import gwas_reference as grch38
 import gwas_stats
@@ -822,10 +823,123 @@ def drop_incomplete_rows(out: pd.DataFrame, qc: dict[str, Any], maf_threshold: f
     return out[keep]
 
 
-def annotate_with_reference(out: pd.DataFrame, qc: dict[str, Any], freqs: Any) -> tuple[pd.DataFrame, dict[str, float]]:
+def _count_cache(qc: dict[str, Any], step: str, cache: Any, before: tuple[int, int]) -> None:
+    counts = qc.setdefault("variant_cache", {}).setdefault(step, {"hits": 0, "misses": 0})
+    counts["hits"] += cache.hits - before[0]
+    counts["misses"] += cache.misses - before[1]
+
+
+def open_variant_caches(reference_root: str, population: str, fasta: Any) -> dict[str, Any]:
+    """The variant caches (see gwas_cache.py) for the 1000 Genomes annotation, the alignment to the reference sequence
+    and the left-alignment of indels; empty when the cache is off or pyarrow is missing."""
+    root = gwas_cache.cache_root(reference_root)
+    caches: dict[str, Any] = {}
+    _, freqs, _ = grch38_references(reference_root, population)
+    if freqs is not None and hasattr(freqs.key, "filename"):
+        cache = gwas_cache.VariantCache.open(root, "annotation", f"v1|{population}|" + gwas_cache.file_signature(freqs.key.filename),
+                                              {"ref_a1": gwas_cache.pa.string() if gwas_cache.pa else None,
+                                               "ref_a2": gwas_cache.pa.string() if gwas_cache.pa else None,
+                                               "ref_af1": gwas_cache.pa.float64() if gwas_cache.pa else None})
+        if cache is not None:
+            caches["annotation"] = cache
+    if fasta is not None and gwas_cache.pa is not None:
+        signature = "v1|" + gwas_cache.file_signature(fasta.path)
+        for kind, columns in (("alignment", {"action": gwas_cache.pa.string()}),
+                              ("indels", {"changed": gwas_cache.pa.bool_(), "pos": gwas_cache.pa.int64(),
+                                          "ea": gwas_cache.pa.string(), "oa": gwas_cache.pa.string()})):
+            cache = gwas_cache.VariantCache.open(root, kind, signature, columns)
+            if cache is not None:
+                caches[kind] = cache
+    return caches
+
+
+def _positions_as_int(frame: pd.DataFrame) -> np.ndarray:
+    pos = numeric_series(frame["POS38"]).to_numpy(dtype="float64")
+    return np.where(np.isfinite(pos), pos, -1).astype("int64")
+
+
+def cached_annotation(out: pd.DataFrame, freqs: Any, cache: Any, qc: dict[str, Any]) -> pd.DataFrame:
+    """alleles.annotate_with_frequencies, taking each variant's result from the cache when it is there."""
+    if cache is None or not len(out):
+        return alleles.annotate_with_frequencies(out, freqs)
+    before = (cache.hits, cache.misses)
+    ea, oa = alleles.upper_alleles(out["EA"]).to_numpy(), alleles.upper_alleles(out["OA"]).to_numpy()
+    h1, h2 = gwas_cache.variant_keys(out["CHR"].to_numpy(dtype=object), _positions_as_int(out), ea, oa)
+    found, values = cache.lookup(h1, h2)
+    miss = np.flatnonzero(~found)
+    if len(miss):
+        computed = alleles.annotate_with_frequencies(out.iloc[miss][["CHR", "POS38", "EA", "OA"]], freqs)
+        fresh = {"ref_a1": computed["REF_A1"].to_numpy(dtype=object), "ref_a2": computed["REF_A2"].to_numpy(dtype=object),
+                 "ref_af1": computed["REF_AF1"].to_numpy(dtype="float64")}
+        for name, array in fresh.items():
+            values[name][miss] = array
+        cache.store(h1[miss], h2[miss], fresh)
+    result = out.copy()
+    result["REF_A1"], result["REF_A2"] = values["ref_a1"].astype(object), values["ref_a2"].astype(object)
+    result["REF_AF1"] = values["ref_af1"].astype("float64")
+    _count_cache(qc, "annotation", cache, before)
+    return result
+
+
+def cached_alignment_actions(out: pd.DataFrame, fasta: Any, cache: Any, qc: dict[str, Any]) -> np.ndarray | None:
+    """The alignment action of every row (None when there is no cache: orient_to_reference then works it out)."""
+    if cache is None or not len(out):
+        return None
+    before = (cache.hits, cache.misses)
+    chrom = normalize_chromosome_series(out["CHR"].reset_index(drop=True)).astype(str).to_numpy()
+    ea, oa = alleles.upper_alleles(out["EA"]).to_numpy(), alleles.upper_alleles(out["OA"]).to_numpy()
+    h1, h2 = gwas_cache.variant_keys(chrom, _positions_as_int(out), ea, oa)
+    found, values = cache.lookup(h1, h2)
+    miss = np.flatnonzero(~found)
+    if len(miss):
+        sub = out.iloc[miss]
+        fresh = alleles.reference_alignment(sub["CHR"], sub["POS38"], sub["EA"], sub["OA"], fasta)["action"].to_numpy(dtype=object)
+        values["action"][miss] = fresh
+        cache.store(h1[miss], h2[miss], {"action": fresh})
+    _count_cache(qc, "alignment", cache, before)
+    return values["action"].astype(object)
+
+
+def cached_normalise_indels(out: pd.DataFrame, fasta: Any, action: np.ndarray, cache: Any, qc: dict[str, Any]) -> tuple[pd.DataFrame, int]:
+    """alleles.normalise_indels, taking each indel's left-aligned form from the cache when it is there."""
+    if cache is None:
+        return alleles.normalise_indels(out, fasta, action)
+    ea, oa = alleles.upper_alleles(out["EA"]).to_numpy(), alleles.upper_alleles(out["OA"]).to_numpy()
+    longer = ((pd.Series(ea).str.len() > 1) | (pd.Series(oa).str.len() > 1)).to_numpy()
+    rows = np.flatnonzero(np.isin(action, ["keep", "swap"]) & longer)
+    if not len(rows):
+        return out.copy(), 0
+    before = (cache.hits, cache.misses)
+    chroms = normalize_chromosome_series(out["CHR"]).astype(str).to_numpy()
+    positions = numeric_series(out["POS38"]).to_numpy(dtype="float64")
+    h1, h2 = gwas_cache.variant_keys(chroms[rows], positions[rows].astype("int64"), ea[rows], oa[rows], action[rows])
+    found, values = cache.lookup(h1, h2)
+    miss = np.flatnonzero(~found)
+    if len(miss):
+        sub_rows = rows[miss]
+        moved_frame, _ = alleles.normalise_indels(out.iloc[sub_rows][["CHR", "POS38", "EA", "OA"]], fasta, action[sub_rows])
+        new_pos = numeric_series(moved_frame["POS38"]).to_numpy(dtype="float64")
+        new_ea, new_oa = moved_frame["EA"].to_numpy(dtype=object), moved_frame["OA"].to_numpy(dtype=object)
+        changed = (new_pos != positions[sub_rows]) | (new_ea != ea[sub_rows]) | (new_oa != oa[sub_rows])
+        fresh = {"changed": changed, "pos": new_pos.astype("int64"), "ea": new_ea, "oa": new_oa}
+        for name, array in fresh.items():
+            values[name][miss] = array
+        cache.store(h1[miss], h2[miss], fresh)
+    changed = values["changed"].astype(bool)
+    new_pos, new_ea, new_oa = positions.copy(), ea.copy(), oa.copy()
+    target = rows[changed]
+    new_pos[target] = values["pos"].astype("int64")[changed]
+    new_ea[target], new_oa[target] = values["ea"][changed], values["oa"][changed]
+    result = out.copy()
+    result["POS38"], result["EA"], result["OA"] = new_pos, new_ea, new_oa
+    _count_cache(qc, "indels", cache, before)
+    return result, int(changed.sum())
+
+
+def annotate_with_reference(out: pd.DataFrame, qc: dict[str, Any], freqs: Any, cache: Any = None) -> tuple[pd.DataFrame, dict[str, float]]:
     """1000 Genomes GRCh38 frequencies of the matched population and EAF fills; returns the frame and its
     allele-frequency concordance moments."""
-    out = alleles.annotate_with_frequencies(out, freqs)
+    out = cached_annotation(out, freqs, cache, qc)
     out, eaf_fills = alleles.fill_eaf_from_reference(out)
     qc.setdefault("reference_fills", {})["EAF"] = eaf_fills
     return out, alleles.af_moments(out)
@@ -968,13 +1082,14 @@ def standardise_piece(df: pd.DataFrame, settings: dict[str, Any], fasta: Any, pa
     out = lift_to_grch38(out, reference_root, qc)
     lap("liftover")
     out = drop_incomplete_rows(out, qc)
-    out, moments = annotate_with_reference(out, qc, freqs)
+    caches = open_variant_caches(reference_root, settings["population"], fasta)
+    out, moments = annotate_with_reference(out, qc, freqs, caches.get("annotation"))
     lap("reference_annotation")
     out = alleles.resolve_palindromic_strand(out, qc, settings["palindromic_tolerance"])
     lap("palindromic_strand")
     if fasta is not None:
-        out, action = alleles.orient_to_reference(out, fasta)
-        out, moved = alleles.normalise_indels(out, fasta, action)
+        out, action = alleles.orient_to_reference(out, fasta, cached_alignment_actions(out, fasta, caches.get("alignment"), qc))
+        out, moved = cached_normalise_indels(out, fasta, action, caches.get("indels"), qc)
         qc["indels_left_aligned"] = moved
     else:
         action = np.full(len(out), "unalignable", dtype=object)
@@ -1452,6 +1567,10 @@ def standardise_table(raw_path: Path, vcf_path: Path, record: dict[str, Any], co
         check_af_concordance(moments, qc)
         merge_pieces([Path(r["part"]) for r in results], [r["ranks"] for r in results], work, vcf_path, record, config, results[0]["decisions"], fasta, qc, wall,
                      reference_root, population, threads=workers)
+        started = time.perf_counter()
+        for variant_cache in open_variant_caches(reference_root, population, fasta).values():
+            variant_cache.compact()
+        wall["variant_cache_compaction"] = time.perf_counter() - started
         per_step: dict[str, float] = {}
         for result in results:
             for step, seconds in result["timings"].items():
