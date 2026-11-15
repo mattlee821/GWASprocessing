@@ -15,7 +15,9 @@ A lookup reads every segment of the buckets its keys fall in (memory-mapped) and
 goes wrong (a missing file, a bucket being compacted, a full disk) is a cache miss: the value is worked out again, so
 the output never depends on the cache's contents. The fingerprint holds the reference files' names, sizes and times, so
 a rebuilt reference starts a new cache. `compact` merges a bucket's segments once it holds more than a few; it runs at
-the end of a GWAS and skips a bucket another job is already compacting.
+the end of a GWAS and skips a bucket another job is already compacting. The segments it merges are renamed to
+`.old` and deleted a day later, because a job on another node may still have one memory-mapped and a deleted file
+kills that job on a shared file system.
 
 GWAS_VARIANT_CACHE sets the cache root (default <reference root>/variant_cache); `off` switches the cache off.
 """
@@ -43,6 +45,7 @@ except ImportError:  # the cache is then off
 BUCKETS = 64
 SHIFT = np.uint64(58)  # the top 6 bits of h1 pick the bucket
 COMPACT_AT = 8  # segments in a bucket before it is merged into 1
+OLD_AFTER = 24 * 3600  # seconds a merged-away segment is kept before it is deleted
 _counter = itertools.count()
 _OPEN: dict[tuple[str, str], "VariantCache | None"] = {}
 
@@ -123,17 +126,19 @@ class VariantCache:
                         table = pa.ipc.open_file(pa.memory_map(str(segment), "r")).read_all().combine_chunks()
                         k1 = table.column("h1").to_numpy()
                         k2 = table.column("h2").to_numpy()
-                    except (OSError, pa.ArrowException):
-                        continue  # compacted away or unreadable: a miss
-                    if not len(k1):
-                        continue
-                    position = np.minimum(np.searchsorted(k1, h1[open_rows]), len(k1) - 1)
-                    hit = (k1[position] == h1[open_rows]) & (k2[position] == h2[open_rows])
-                    if not hit.any():
-                        continue
-                    rows, source = open_rows[hit], position[hit]
+                        if not len(k1):
+                            continue
+                        position = np.minimum(np.searchsorted(k1, h1[open_rows]), len(k1) - 1)
+                        hit = (k1[position] == h1[open_rows]) & (k2[position] == h2[open_rows])
+                        if not hit.any():
+                            continue
+                        rows, source = open_rows[hit], position[hit]
+                        taken = {name: table.column(name).take(pa.array(source)).to_numpy(zero_copy_only=False)
+                                 for name in self.columns}
+                    except (OSError, ValueError, pa.ArrowException):
+                        continue  # compacted away, stale or unreadable: a miss
                     for name in self.columns:
-                        values[name][rows] = table.column(name).take(pa.array(source)).to_numpy(zero_copy_only=False)
+                        values[name][rows] = taken[name]
                     found[rows] = True
         self.hits += int(found.sum())
         self.misses += int((~found).sum())
@@ -210,12 +215,27 @@ class VariantCache:
                 final = self._write(b, table.take(keep))
                 if final is None:
                     continue
-                for segment in segments:
+                for segment in segments:  # renamed, not deleted: a job that has the file mapped keeps a valid handle
                     try:
-                        segment.unlink()
+                        os.replace(segment, segment.with_name(segment.name + ".old"))
                     except OSError:
                         pass
                 merged += 1
             finally:
                 handle.close()
+        self._remove_old()
         return merged
+
+    def _remove_old(self, age: float = OLD_AFTER) -> None:
+        """Delete the segments that compaction set aside once no running job can still be using them."""
+        cutoff = time.time() - age
+        for bucket in self.directory.glob("[0-9][0-9]"):
+            try:
+                for path in bucket.glob("seg-*.arrow.old"):
+                    try:
+                        if path.stat().st_mtime < cutoff:
+                            path.unlink()
+                    except OSError:
+                        pass
+            except OSError:
+                pass

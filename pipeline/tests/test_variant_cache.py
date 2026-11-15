@@ -110,6 +110,28 @@ class VariantCacheTest(unittest.TestCase):
             self.assertEqual(records(again), records(off))
             self.assertEqual(again.qc["variant_cache"]["alignment"]["misses"], 0)
 
+        with self.subTest("a merged-away segment stays readable through an open map, and is deleted only when old"):
+            import numpy as np
+            import pyarrow as pa
+            directory = sorted(p for p in cache_dir.iterdir() if p.is_dir())[0]
+            bucket = directory / "00"
+            bucket.mkdir(exist_ok=True)
+            cache = gwas_cache.VariantCache(directory, {"v": pa.int64()})
+            h = np.arange(1, 4, dtype=np.uint64)
+            for k in range(10):
+                cache.store(h, h, {"v": np.array([k, k, k], dtype=object)})
+            segments = cache._segments(0)
+            self.assertGreater(len(segments), 8)
+            held = pa.ipc.open_file(pa.memory_map(str(segments[0]), "r"))
+            self.assertGreater(cache.compact(), 0)
+            self.assertEqual(len(cache._segments(0)), 1)
+            self.assertTrue(list(bucket.glob("seg-*.arrow.old")))
+            self.assertGreater(held.read_all().num_rows, 0)  # still readable
+            found, _ = cache.lookup(h, h)
+            self.assertTrue(found.all())
+            cache._remove_old(age=0)
+            self.assertFalse(list(bucket.glob("seg-*.arrow.old")))
+
 
 if __name__ == "__main__":
     unittest.main()
