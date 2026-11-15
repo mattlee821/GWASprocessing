@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import csv
+import fcntl
 import gzip
 import hashlib
 import html.parser
@@ -322,6 +324,20 @@ def atomic_write_text(path: str | Path, text: str) -> None:
         os.replace(tmp, path)
     finally:
         tmp.unlink(missing_ok=True)
+
+
+@contextlib.contextmanager
+def file_lock(path: str | Path):
+    """Hold an exclusive lock on `<path>.lock` while a file is read, changed and written back, so runs that overlap
+    (several studies submitted together) do not overwrite each other's updates."""
+    lock_path = Path(str(path) + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_path, "w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def write_state(path: str | Path, rows: Iterable[dict[str, str]]) -> None:

@@ -22,7 +22,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from gwas_pipeline_common import output_stem, read_json, read_state, utc_now, write_json
+from gwas_pipeline_common import file_lock, output_stem, read_json, read_state, utc_now, write_json
 
 REGISTRY = ".manifest_registry.json"
 PAGE = "manifest.html"
@@ -187,11 +187,12 @@ document.querySelectorAll('#rows th').forEach((th, i) => th.addEventListener('cl
 
 def write_page(work_root: Path, log_root: Path | None = None) -> Path:
     work_root.mkdir(parents=True, exist_ok=True)
-    registry = update_registry(work_root, log_root)
-    page = work_root / PAGE
-    tmp = page.with_suffix(".html.tmp")
-    tmp.write_text(render([row_view(entry, work_root) for entry in registry.values()], work_root), encoding="utf-8")
-    os.replace(tmp, page)
+    with file_lock(work_root / REGISTRY):
+        registry = update_registry(work_root, log_root)
+        page = work_root / PAGE
+        tmp = page.with_name(f"{PAGE}.{os.getpid()}.tmp")
+        tmp.write_text(render([row_view(entry, work_root) for entry in registry.values()], work_root), encoding="utf-8")
+        os.replace(tmp, page)
     return page
 
 

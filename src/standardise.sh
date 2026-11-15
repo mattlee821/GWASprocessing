@@ -175,8 +175,13 @@ else
   exit 2
 fi
 
+# Each run keeps its own summaries and Nextflow log under <log root>/runs/<run id>/, so runs started together
+# (several studies submitted at once) never read or overwrite each other's files.
+RUN_ID="${SLURM_JOB_ID:-$(date +%Y%m%d-%H%M%S)-$$}"
+LOG_ROOT="${LOG_ROOT}/runs/${RUN_ID}"
+NEXTFLOW_LOG="${NEXTFLOW_LOG%.log}.${RUN_ID}.log"
 mkdir -p "${WORK_ROOT}" "${REFERENCE_ROOT}" "${TEMP_ROOT}" "${LOG_ROOT}" "${NEXTFLOW_WORK}" "$(dirname "${NEXTFLOW_LOG}")"
-# Summaries from an earlier run must never be reported as this run's results.
+# Summaries from an earlier run with the same id must never be reported as this run's results.
 rm -f "${LOG_ROOT}/run_manifest_summary.json" "${LOG_ROOT}/run_manifest.tsv" "${LOG_ROOT}/state_update_summary.json"
 
 export GWAS_WORK_ROOT="${WORK_ROOT}" GWAS_REFERENCE_ROOT="${REFERENCE_ROOT}" GWAS_CONFIG_ROOT="${CONFIG_ROOT}" GWAS_LOG_ROOT="${LOG_ROOT}"

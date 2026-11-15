@@ -300,7 +300,8 @@ class RunTest(unittest.TestCase):
             return common.read_state(tmp / "GWAS" / ".standardise_state.tsv")
 
         def summary() -> dict:
-            return json.loads((tmp / "temp" / "logs" / "run_manifest_summary.json").read_text(encoding="utf-8"))
+            newest = max((tmp / "temp" / "logs" / "runs").glob("*/run_manifest_summary.json"), key=lambda p: p.stat().st_mtime)
+            return json.loads(newest.read_text(encoding="utf-8"))
 
         first_hash = ""
         with self.subTest("rows run and fail independently; failed rows are listed and the exit status is non-zero"):

@@ -61,5 +61,21 @@ class ScratchTest(unittest.TestCase):
                 self.assertTrue(made.is_dir() and made.parent == scratch)
 
 
+class FileLockTest(unittest.TestCase):
+    def test_overlapping_updates_are_not_lost(self):
+        code = ("import sys; sys.path.insert(0, sys.argv[1]); import gwas_pipeline_common as c, pathlib\n"
+                "f = pathlib.Path(sys.argv[2])\n"
+                "for _ in range(40):\n"
+                "    with c.file_lock(f):\n"
+                "        n = int(f.read_text()); f.write_text(str(n + 1))\n")
+        with tempfile.TemporaryDirectory() as tmp:
+            counter = Path(tmp) / "counter.txt"
+            counter.write_text("0")
+            procs = [subprocess.Popen([sys.executable, "-c", code, str(BIN), str(counter)]) for _ in range(4)]
+            for proc in procs:
+                self.assertEqual(proc.wait(), 0)
+            self.assertEqual(int(counter.read_text()), 160)
+
+
 if __name__ == "__main__":
     unittest.main()
