@@ -28,7 +28,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-LP_PASS = 6.0  # suggestive: variants this strong in any study are compared
+LP_PASS = 6.0  # default for --lp-pass: variants this strong in any study are compared
 LP_SIG = -np.log10(5e-8)  # genome-wide significant
 MIN_MATCHED = 10  # matched variants needed for a verdict
 PALINDROMIC = {frozenset("AT"), frozenset("CG")}
@@ -71,13 +71,15 @@ def read_vcf(path: Path, keep: set[str] | None = None, lp_min: float | None = No
     return frame.drop_duplicates("key").set_index("key")
 
 
-def compare(a: pd.DataFrame, b: pd.DataFrame) -> dict:
+def compare(a: pd.DataFrame, b: pd.DataFrame, lp_pass: float = LP_PASS) -> dict:
     both = a.join(b, how="inner", lsuffix="_a", rsuffix="_b")
-    either = both[(both["lp_a"] >= LP_PASS) | (both["lp_b"] >= LP_PASS)]
+    either = both[(both["lp_a"] >= lp_pass) | (both["lp_b"] >= lp_pass)]
     z_a, z_b = either["es_a"] / either["se_a"], either["es_b"] / either["se_b"]
     r_z = float(np.corrcoef(z_a, z_b)[0, 1]) if len(either) >= 3 and z_a.std() > 0 and z_b.std() > 0 else np.nan
     strong = either[(either["lp_a"] >= LP_SIG) & (either["lp_b"] >= LP_SIG)]
     agree = float((np.sign(strong["es_a"]) == np.sign(strong["es_b"])).mean()) if len(strong) else np.nan
+    nominal = either[(either["lp_a"] >= lp_pass) & (either["lp_b"] >= lp_pass)]
+    agree_nominal = float((np.sign(nominal["es_a"]) == np.sign(nominal["es_b"])).mean()) if len(nominal) else np.nan
     lead = {}
     for tag in ("a", "b"):
         if len(either):
@@ -90,22 +92,24 @@ def compare(a: pd.DataFrame, b: pd.DataFrame) -> dict:
     n = len(either)
     if n < MIN_MATCHED or np.isnan(r_z):
         verdict = "too few shared variants"
-    elif r_z <= -0.3 or (not np.isnan(agree) and agree <= 0.1):
+    elif r_z <= -0.3 or (not np.isnan(agree) and agree <= 0.1) or (len(nominal) >= 10 and agree_nominal <= 0.1):
         verdict = "SIGN OR ALLELE FLIPPED"
     elif r_z >= 0.5 and (np.isnan(agree) or agree >= 0.9) and lead["a"] is not False and lead["b"] is not False:
         verdict = "ok"
     else:
         verdict = "check"
     return {"n_shared_suggestive": n, "n_both_significant": len(strong), "r_z": r_z, "sign_agree_both_significant": agree,
+            "n_both_suggestive": len(nominal), "sign_agree_both_suggestive": agree_nominal,
             "lead_a_same_sign": lead["a"], "lead_b_same_sign": lead["b"], "r_af": r_af, "verdict": verdict}
 
 
-def protein_pairs(job: tuple[str, dict[str, Path]]) -> list[dict]:
-    protein, paths = job
-    suggestive = {name: read_vcf(path, lp_min=LP_PASS) for name, path in paths.items()}
+def protein_pairs(job: tuple) -> list[dict]:
+    protein, paths, *rest = job
+    lp_pass = rest[0] if rest else LP_PASS
+    suggestive = {name: read_vcf(path, lp_min=lp_pass) for name, path in paths.items()}
     keep = set().union(*(set(frame.index) for frame in suggestive.values()))
     full = {name: read_vcf(path, keep=keep) for name, path in paths.items()}
-    return [{"protein": protein, "study_a": x, "study_b": y, **compare(full[x], full[y])} for x, y in itertools.combinations(sorted(full), 2)]
+    return [{"protein": protein, "study_a": x, "study_b": y, **compare(full[x], full[y], lp_pass)} for x, y in itertools.combinations(sorted(full), 2)]
 
 
 def find_files(studies: dict[str, Path]) -> dict[str, dict[str, Path]]:
@@ -121,6 +125,7 @@ def main() -> int:
     parser.add_argument("--study", action="append", required=True, help="NAME=FOLDER, at least 2")
     parser.add_argument("--proteins", help="comma-separated output names (default: every protein in 2 or more studies)")
     parser.add_argument("--jobs", type=int, default=4)
+    parser.add_argument("--lp-pass", type=float, default=LP_PASS, help="-log10 P a variant needs in either study to be compared (default 6; lower it, for example to 3, when a study has only weak signals)")
     parser.add_argument("--out", default="concordance.tsv")
     args = parser.parse_args()
     studies = dict(item.split("=", 1) for item in args.study)
@@ -138,7 +143,7 @@ def main() -> int:
         print("No protein is in 2 or more of the studies")
         return 1
     with ProcessPoolExecutor(args.jobs) as pool:
-        rows = [row for result in pool.map(protein_pairs, sorted(found.items())) for row in result]
+        rows = [row for result in pool.map(protein_pairs, [(p, paths, args.lp_pass) for p, paths in sorted(found.items())]) for row in result]
     table = pd.DataFrame(rows)
     table.to_csv(args.out, sep="\t", index=False, float_format="%.3f")
     with pd.option_context("display.width", 250, "display.max_columns", 20):
