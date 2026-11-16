@@ -127,6 +127,11 @@ def main() -> int:
     if len(studies) < 2:
         parser.error("give at least 2 --study NAME=FOLDER")
     found = find_files({name: Path(folder) for name, folder in studies.items()})
+    for name in studies:
+        count = sum(name in paths for paths in found.values())
+        print(f"{name}: {count} proteins shared with at least 1 other study")
+        if not count:
+            parser.error(f"no standardised files of {name} match another study (looked for {studies[name]}/standardise/<name>/*.vcf.gz)")
     if args.proteins:
         found = {p: found[p] for p in args.proteins.split(",") if p in found}
     if not found:
