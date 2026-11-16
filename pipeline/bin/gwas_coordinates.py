@@ -32,13 +32,13 @@ def position_key(chrom: Any, pos: Any) -> np.ndarray:
 
 
 _VARIANT_ID = re.compile(
-    r"^(?:chr)?(?P<chrom>[0-9]{1,2}|X|Y|MT|M|XY)[:_](?P<pos>[0-9]+)(?:[:_](?P<a1>[ACGTN]+)[:_](?P<a2>[ACGTN]+))?$",
+    r"^(?:chr)?(?P<chrom>[0-9]{1,2}|X|Y|MT|M|XY)[:_](?P<pos>[0-9]+)(?:[:_](?P<a1>[ACGTN]+)[:_/](?P<a2>[ACGTN]+))?$",
     flags=re.I,
 )
 
 
 def parse_variant_ids(ids: pd.Series) -> pd.DataFrame:
-    """Parse chr:pos[:a1:a2] / chr_pos_a1_a2 identifiers into CHR and POS (missing where unparseable)."""
+    """Parse chr:pos[:a1:a2] / chr_pos_a1_a2 / chr:pos_a1/a2 (METAL) identifiers into CHR and POS (missing where unparseable)."""
     text = pd.Series(ids).astype("string").str.strip()
     parts = text.str.extract(_VARIANT_ID)
     chrom = parts["chrom"].map(lambda v: normalize_chromosome(v) if isinstance(v, str) else pd.NA)

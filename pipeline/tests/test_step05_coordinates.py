@@ -280,6 +280,17 @@ class Step05GRCh38CoordinatesTest(unittest.TestCase):
             self.assertEqual((by_pos[9100]["ID"], by_pos[200000]["ID"]), ("rs9000", "."))
             self.assertNotIn("hg19_to_hg38", decoy.qc.get("liftover", {}))
 
+        with self.subTest("METAL markers (chr:pos_a1/a2) give the positions, and the alleles come from Allele1 and Allele2"):
+            raw = write_table(tmp / "metal.tsv", ["MarkerName", "Allele1", "Allele2", "Freq1", "Effect", "StdErr", "P-value", "Direction"],
+                              [["1:1100_A/G", "a", "g", 0.11, 0.2, 0.05, 1e-6, "++-"], ["1:2100_T/C", "c", "t", 0.21, -0.1, 0.04, 0.5, "-+-"]])
+            yaml_path = tmp / "metal.yaml"
+            yaml_path.write_text("columns:\n  SNPID: MarkerName\n  EA: Allele1\n  OA: Allele2\n  EAF: Freq1\n  BETA: Effect\n  SE: StdErr\n  P: P-value\n"
+                                 "extras:\n  - Direction\n", encoding="utf-8")
+            metal = run_standardise(tmp, raw, example_reference(), name="metal", input_build="hg38", study_yaml=str(yaml_path))
+            self.assertEqual(metal.returncode, 0, metal.stderr)
+            self.assertEqual([(r["CHROM"], r["POS"], r["REF"], r["ALT"]) for r in metal.rows], [("1", 1100, "G", "A"), ("1", 2100, "T", "C")])
+            self.assertEqual(metal.qc["positions_from_variant_ids"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -60,13 +60,13 @@ class TarTableTest(unittest.TestCase):
             self.assertEqual(raised.exception.code, EXIT_DATA)
             self.assertFalse(list((tmp / "raw").glob("*.part")))
 
+    def test_qc_skip_flags_drops_listed_flag(self):
+        import standardise_gwas as sg
+        qc = {"lambda_gc": 3.0, "qc_metrics": {"max_sample_size": 5000}}
+        self.assertEqual(set(sg.qc_flags(qc, {})), {"inflation_factor", "n"})
+        self.assertEqual(set(sg.qc_flags(qc, {}, ["inflation_factor"])), {"n"})
+
 
 if __name__ == "__main__":
     unittest.main()
 
-
-def test_qc_skip_flags_drops_listed_flag():
-    import standardise_gwas as sg
-    qc = {"lambda_gc": 3.0, "qc_metrics": {"max_sample_size": 5000}}
-    assert set(sg.qc_flags(qc, {})) == {"inflation_factor", "n"}
-    assert set(sg.qc_flags(qc, {}, ["inflation_factor"])) == {"n"}

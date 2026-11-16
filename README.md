@@ -180,7 +180,7 @@ Protein studies name their outputs `UNIPROT_STUDYID`, where `_` separates the 2 
 
 ### 2. Read
 
-The delimiter comes from the manifest or YAML, or is detected from the header (tab, comma or whitespace); `.` reads as missing and leading `##` lines are skipped. Columns are matched against built-in aliases (for example `EA`, `effect_allele`, `ALLELE1` and `A1`; `NCASE`; `INFO` and `Rsq`), and a YAML `columns:` block names any the aliases miss. Allele-dependent columns are taken from 1 family only, the original columns or the GWAS Catalog `hm_*` columns, so alleles are never paired with an effect oriented to other alleles. Compound identifiers (`rs123:A:G`, `1:12345:A:G`) keep their text in `INFO/SNPID` and supply positions when a file has none. A multi-allelic GWAS-VCF record becomes 1 row per ALT allele.
+The delimiter comes from the manifest or YAML, or is detected from the header (tab, comma or whitespace); `.` reads as missing and leading `##` lines are skipped. Columns are matched against built-in aliases (for example `EA`, `effect_allele`, `ALLELE1` and `A1`; `NCASE`; `INFO` and `Rsq`), and a YAML `columns:` block names any the aliases miss. Allele-dependent columns are taken from 1 family only, the original columns or the GWAS Catalog `hm_*` columns, so alleles are never paired with an effect oriented to other alleles. Compound identifiers (`rs123:A:G`, `1:12345:A:G`, and the METAL form `1:12345_A/G`) keep their text in `INFO/SNPID` and supply positions when a file has none. A multi-allelic GWAS-VCF record becomes 1 row per ALT allele.
 
 ### 3. Parse and derive
 
