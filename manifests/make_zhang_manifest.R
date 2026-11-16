@@ -8,7 +8,7 @@
 #
 #   --files         a folder of the per-protein files (SeqId_<a>_<b>.PHENO1.glm.linear), or a text file listing their names
 #   --location-dir  folder written into GWAS_location (default: --files when it is a folder)
-#   --usefuldata    path of the usefuldata package (default: the installed package, else ~/research/000_packages/usefuldata)
+#   --usefuldata    path of the usefuldata package (default: the installed package; install it with remotes::install_github("mattlee821/usefuldata"))
 #   --st01          the study's seqid.txt (seqid_in_sample, uniprot_id, entrezgenesymbol, ...), to report where its UniProt differs
 #   --limit         the first N files in SeqId order (a subset to test)
 #
@@ -40,7 +40,7 @@ if (is.na(package_path) && requireNamespace("usefuldata", quietly = TRUE)) {
   mapping <- usefuldata::somalogic_seqid_uniprot_current
   package_version <- as.character(utils::packageVersion("usefuldata"))
 } else {
-  if (is.na(package_path)) package_path <- path.expand("~/research/000_packages/usefuldata")
+  if (is.na(package_path)) stop("The R package usefuldata is needed: remotes::install_github(\"mattlee821/usefuldata\"), or give --usefuldata PATH to a checkout of it", call. = FALSE)
   rda <- file.path(package_path, "data", "somalogic_seqid_uniprot_current.rda")
   if (!file.exists(rda)) stop("usefuldata mapping not found: ", rda, call. = FALSE)
   environment_ <- new.env()
