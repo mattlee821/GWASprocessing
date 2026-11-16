@@ -272,6 +272,14 @@ Compared with an OpenGWAS file, the output is on GRCh38, fills `FORMAT/AF` from 
 | `1000genomes/GRCh38/` | ALT frequencies for AFR, AMR, EAS, EUR, SAS and ALL | 1000 Genomes 30x on GRCh38, 2,504 unrelated phase 3 samples |
 | `build_detection/` | 2 million common SNPs placed in both builds | 1000 Genomes GRCh38 EUR, fixed seed, lifted with BCFtools/liftover |
 
+### Check a protein across studies
+
+When the same protein is in 2 or more studies (deCODE, Fenland and ARIC all measure SomaScan aptamers by SeqId), `pipeline/bin/concordance.py` compares their standardised outputs and reports, per protein and pair of studies, the correlation of the z scores at variants suggestive (-log10 P >= 6) in either study, the sign agreement at variants genome-wide significant in both, whether each study's lead variant has the same sign in the other, and the correlation of allele frequencies at non-palindromic variants. A flipped sign or swapped allele shows as a negative correlation. Each study folder needs `standardise/<output name>/<output name>.vcf.gz`, and bcftools must be on the PATH:
+
+```bash
+python3 pipeline/bin/concordance.py --study ferkingstad=GWAS/ferkingstad_2021_34857953 --study pietzner=GWAS/pietzner_2021_34648354 --out concordance.tsv
+```
+
 ## Comparison with other pipelines and benchmark
 
 ### Step comparison
