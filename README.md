@@ -272,6 +272,19 @@ Compared with an OpenGWAS file, the output is on GRCh38, fills `FORMAT/AF` from 
 | `1000genomes/GRCh38/` | ALT frequencies for AFR, AMR, EAS, EUR, SAS and ALL | 1000 Genomes 30x on GRCh38, 2,504 unrelated phase 3 samples |
 | `build_detection/` | 2 million common SNPs placed in both builds | 1000 Genomes GRCh38 EUR, fixed seed, lifted with BCFtools/liftover |
 
+### Protein GWAS studies
+
+The study YAML and a manifest script for each of 4 protein studies are in `manifests/`, tested on the first 10 proteins of each (standardised, then compared across studies with `concordance.py` below):
+
+| Study | Study YAML | Manifest script | Input |
+|---|---|---|---|
+| Ferkingstad 2021 (PMID 34857953), deCODE SomaScan, 4,907 aptamers | `ferkingstad_2021_34857953.yaml` | `make_ferkingstad_manifest.R` | the per-protein `.txt.gz` files, plus deCODE's annotation and excluded-variant files in `<GWAS_WORK_ROOT>/ferkingstad_2021_34857953/docs/` |
+| Pietzner 2021 (PMID 34648354), Fenland SomaScan | `pietzner_2021_34648354.yaml` | `make_pietzner_manifest.R` | the per-protein `.txt.gz` files (hg19); D and I allele codes are recovered from dbSNP |
+| Sun 2023 (PMID 37794186), UKB-PPP Olink | `sun_2023_37794186.yaml` | `make_sun_manifest.R` | the per-protein `.tar` files (1 table per chromosome) and the Olink protein maps from Synapse |
+| Zhang 2022 (PMID 35501419), ARIC SomaScan cis-pGWAS | `zhang_2022_35501419.yaml` | `make_zhang_manifest.R` | the per-protein `.glm.linear` files; the genomic inflation flag is left out (cis windows only) |
+
+A manifest script writes the manifest for your own folder of files (`Rscript manifests/make_ferkingstad_manifest.R --files FOLDER --out manifests/ferkingstad.tsv`; the header of each script lists its options). The output is named `UNIPROT_SEQID` (SomaScan) or `UNIPROT_OLINKID` (Olink), for example `P03951_2190-55` and `P03951_OID30773`, with the UniProt accession taken from the R package `usefuldata` (dataset `somalogic_seqid_uniprot_current`) for SomaScan and from the Olink maps for Olink. The manifest rows carry the paths of your files, so keep your manifests local: only these YAMLs and scripts are tracked.
+
 ### Check a protein across studies
 
 When the same protein is in 2 or more studies (deCODE, Fenland and ARIC all measure SomaScan aptamers by SeqId), `pipeline/bin/concordance.py` compares their standardised outputs and reports, per protein and pair of studies, the correlation of the z scores at variants suggestive (-log10 P >= 6) in either study, the sign agreement at variants genome-wide significant in both, whether each study's lead variant has the same sign in the other, and the correlation of allele frequencies at non-palindromic variants. A flipped sign or swapped allele shows as a negative correlation. Each study folder needs `standardise/<output name>/<output name>.vcf.gz`, and bcftools must be on the PATH:

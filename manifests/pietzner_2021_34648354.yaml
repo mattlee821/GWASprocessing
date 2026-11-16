@@ -1,0 +1,22 @@
+description: Pietzner et al. Fenland Somalogic pGWAS
+input_build: hg19
+delimiter: "\t"
+columns:
+  CHR: chr
+  POS: pos
+  SNP: rsid
+  EA: Allele1
+  OA: Allele2
+  EAF: Freq1
+  BETA: Effect
+  SE: StdErr
+  P: Pvalue
+  N: TotalSampleSize
+transforms:
+  uppercase_alleles: true
+extras:
+  - Direction
+# Fenland codes indels as D (deletion) and I (insertion) with no sequence: dbSNP gives the sequences by rsID
+indel_codes:
+  deletion: D
+  insertion: I

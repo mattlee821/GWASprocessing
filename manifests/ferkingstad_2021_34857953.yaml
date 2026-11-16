@@ -1,0 +1,42 @@
+# Ferkingstad et al. 2021 (PMID 34857953): deCODE SomaScan pGWAS, 4,907 aptamers, hg38, European (Icelandic).
+# The per-protein files carry only a minor allele frequency (ImpMAF), and sometimes otherAllele equal to effectAllele at
+# multiallelic sites. deCODE's annotation file corrects both: effectAlleleFreq is the effect allele frequency and
+# otherAllele is '!' at multiallelic sites, where the effect allele was tested against every other allele combined
+# (21% of variants, mostly indels). `multiallelic` keeps those rows: the other allele is taken from the variant ID
+# (Name, chr:pos:effect:other, whose second allele is the GRCh38 reference allele) and the record carries INFO/MA, so
+# downstream analyses can drop them (bcftools view -e 'INFO/MA=1'). Rows whose ID gives no other allele (the effect allele
+# is the reference allele and the ID repeats it) have no allele to write and are removed. The annotation file lists only the variants
+# deCODE kept; the excluded-variants file lists the quality-failed ones. Both join on Name, and both are large (27 and
+# 3.7 million rows), so `index: true` builds a lookup beside each file once and every protein reads only its own rows.
+description: Ferkingstad et al. deCODE SomaScan pGWAS
+input_build: hg38
+delimiter: "\t"
+columns:
+  CHR: Chrom
+  POS: Pos
+  SNPID: Name
+  SNP: rsids
+  EA: effectAllele
+  OA: otherAllele_join      # the annotation file's otherAllele (the protein file's column keeps its own name)
+  EAF: effectAlleleFreq
+  BETA: Beta
+  SE: SE
+  P: Pval
+  LOG10P: minus_log10_pval
+  N: N
+exclude:
+  file: "${GWAS_WORK_ROOT}/ferkingstad_2021_34857953/docs/assocvariants.excluded.txt.gz"
+  key: Name
+  index: true
+joins:
+  - file: "${GWAS_WORK_ROOT}/ferkingstad_2021_34857953/docs/assocvariants.annotated.txt.gz"
+    on: Name
+    how: inner
+    index: true
+    columns: [otherAllele, effectAlleleFreq]   # only these are needed from the annotation file
+transforms:
+  uppercase_alleles: true
+multiallelic:
+  marker: "!"
+extras:
+  - ImpMAF

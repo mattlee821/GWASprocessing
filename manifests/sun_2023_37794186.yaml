@@ -1,0 +1,22 @@
+description: Sun et al. UKB-PPP Olink pGWAS, combined (multi-ancestry) discovery + replication
+input_build: hg38
+# one table per protein, joined from the per-chromosome files of the tar by stage_source.py (space-separated)
+delimiter: "\\s+"
+columns:
+  CHR: CHROM
+  POS: GENPOS
+  SNPID: ID
+  EA: ALLELE1
+  OA: ALLELE0
+  EAF: A1FREQ
+  BETA: BETA
+  SE: SE
+  LOG10P: LOG10P
+  N: N
+transforms:
+  uppercase_alleles: true
+extras:
+  - INFO
+  - CHISQ
+  - TEST
+  - EXTRA

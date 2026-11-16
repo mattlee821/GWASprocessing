@@ -28,7 +28,16 @@ __pycache__/
 .DS_Store
 ._*
 
-# Your own manifests and study YAMLs stay local; only the example manifest and its study YAML are tracked
+# Your own manifests and study YAMLs stay local; tracked are the benchmark manifest and its study YAML, and the study YAML
+# and manifest script of each protein pGWAS (Ferkingstad, Pietzner, Sun, Zhang)
 manifests/*
 !manifests/test.tsv
 !manifests/omara_2018_30093612.yaml
+!manifests/ferkingstad_2021_34857953.yaml
+!manifests/pietzner_2021_34648354.yaml
+!manifests/sun_2023_37794186.yaml
+!manifests/zhang_2022_35501419.yaml
+!manifests/make_ferkingstad_manifest.R
+!manifests/make_pietzner_manifest.R
+!manifests/make_sun_manifest.R
+!manifests/make_zhang_manifest.R
