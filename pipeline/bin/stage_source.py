@@ -19,6 +19,7 @@ from pathlib import Path
 
 from download_gwas_catalog import download_gwas_catalog, md5, verify_gzip
 from download_opengwas import download_opengwas
+from download_synapse import download_synapse
 from gwas_pipeline_common import (
     MANIFEST_COLUMNS,
     MANIFEST_OPTIONAL_COLUMNS,
@@ -187,8 +188,18 @@ def main() -> None:
             return Path(info["raw_path"])
         raw_path = checked_download(fetch_opengwas, metadata)
         metadata.update(info)
+    elif source_type == "synapse":
+        syn_info = download_synapse(location, raw_dir)
+        metadata.update(syn_info)
+        raw_path = Path(syn_info["raw_path"])
+        if raw_path.name.endswith(".tar"):
+            raw_path, tar_info = combine_tar_table(raw_path, raw_dir, row["output_id"])
+            metadata.update(tar_info)
     elif source_type == "direct_url":
         raw_path = checked_download(lambda: download_url(location, raw_dir), metadata)
+        if raw_path.name.endswith(".tar"):
+            raw_path, tar_info = combine_tar_table(raw_path, raw_dir, row["output_id"])
+            metadata.update(tar_info)
     elif source_type == "local":
         source = Path(location.replace("file://", ""))
         if not source.exists():

@@ -44,12 +44,13 @@ from gwas_pipeline_common import (
     settings_fingerprint,
     state_row_complete,
     study_id_from_row,
+    synapse_entity_id,
     write_json,
 )
 
 DERIVED_COLUMNS = ["study_id", "output_id", "row_hash", "raw_dir", "standardise_dir", "output_prefix", "settings_hash"]
 RUN_COLUMNS = MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS + DERIVED_COLUMNS
-SUPPORTED_SOURCES = {"gwas_catalog", "opengwas", "direct_url", "local"}
+SUPPORTED_SOURCES = {"gwas_catalog", "opengwas", "synapse", "direct_url", "local"}
 SEX_VALUES = {"combined", "male", "female"}
 FORMAT_VALUES = {"table", "vcf"}
 
@@ -73,6 +74,8 @@ def validate_row(row: dict[str, str], line: int, source_type: str) -> list[str]:
         errors.append(f"row {line}: unsupported source_type '{source_type}'")
     if source_type == "opengwas" and not opengwas_dataset_id(row["GWAS_location"]):
         errors.append(f"row {line}: no OpenGWAS dataset ID found in {row['GWAS_location']}")
+    if source_type == "synapse" and not synapse_entity_id(row["GWAS_location"]):
+        errors.append(f"row {line}: no Synapse ID (syn...) found in {row['GWAS_location']}")
     if source_type == "gwas_catalog" and not re.search(r"GCST\d+", row["GWAS_location"], flags=re.I):
         errors.append(f"row {line}: no GWAS Catalog accession (GCST...) found in {row['GWAS_location']}")
     sex = str(row.get("sex", "") or "").strip().lower()

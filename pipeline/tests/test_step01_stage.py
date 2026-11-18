@@ -13,9 +13,11 @@ from __future__ import annotations
 import gzip
 import hashlib
 import http.server
+import io
 import json
 import os
 import shutil
+import tarfile
 import tempfile
 import threading
 import unittest
@@ -25,6 +27,7 @@ from unittest import mock
 from testlib import EXAMPLES, LocalHttpServer, make_reference, run_script, run_standardise, write_table
 
 import download_gwas_catalog
+import download_synapse
 import gwas_pipeline_common as common
 
 ACCESSION, PMID = "GCST008996", "30239722"
@@ -293,6 +296,115 @@ class Step01StageTest(unittest.TestCase):
                 self.assertEqual(proc.returncode, 78, proc.stderr)
                 self.assertIn("expired", proc.stderr)
                 self.assertNotIn(TEST_TOKEN, proc.stderr + proc.stdout)  # the token is never echoed
+
+        # --- Synapse --------------------------------------------------------------------------------------------
+        syn_id = "syn51365303"
+        syn_payload = gzip.compress(b"chr\tpos\trsid\tAllele1\tAllele2\tFreq1\tEffect\tStdErr\tPvalue\tTotalSampleSize\n"
+                                    b"1\t100\trs1\tA\tG\t0.2\t0.1\t0.02\t0.001\t10000\n")
+        syn_md5 = hashlib.md5(syn_payload).hexdigest()
+        syn_script: dict = {}
+        with ScriptedServer(syn_script) as server:
+            syn_script.update({
+                f"/repo/v1/entity/{syn_id}": [(200, json.dumps({
+                    "id": syn_id, "name": "PROT_1000_1.txt.gz", "versionNumber": 1,
+                    "concreteType": "org.sagebionetworks.repo.model.FileEntity", "dataFileHandleId": "fh99",
+                }).encode(), {})],
+                "/file/v1/fileHandle/batch": [(200, json.dumps({
+                    "requestedFiles": [{
+                        "fileHandleId": "fh99",
+                        "preSignedURL": f"{server.url}/s3/PROT_1000_1.txt.gz?sig=secret-s3-sig",
+                        "fileHandle": {
+                            "id": "fh99", "fileName": "PROT_1000_1.txt.gz",
+                            "concreteType": "org.sagebionetworks.repo.model.file.S3FileHandle",
+                            "contentSize": len(syn_payload), "contentMd5": syn_md5,
+                        },
+                    }],
+                }).encode(), {})],
+                "/s3/PROT_1000_1.txt.gz": [(200, syn_payload, {})],
+            })
+            syn_env = {**os.environ, "SYNAPSE_API_ROOT": server.url, "SYNAPSE_TOKEN": TEST_TOKEN, "SYNAPSE_AUTH_TOKEN": ""}
+            syn_proc, syn_record = self.stage(
+                self.row(f"https://www.synapse.org/#!Synapse:{syn_id}", "synapse", name="synapse_ok"), env=syn_env
+            )
+            syn_requests = list(server.handler.requests)
+
+        with self.subTest("Synapse sources use the authenticated API, verify MD5 and never persist signed URLs"):
+            self.assertEqual(syn_proc.returncode, 0, syn_proc.stderr)
+            self.assertEqual(Path(syn_record["raw_path"]).read_bytes(), syn_payload)
+            self.assertEqual(syn_record["metadata"]["synapse_id"], syn_id)
+            self.assertEqual((syn_record["metadata"]["md5"]["checked"], syn_record["metadata"]["md5"]["ok"]), (True, True))
+            entity_call = next(r for r in syn_requests if r[1] == f"/repo/v1/entity/{syn_id}")
+            batch_call = next(r for r in syn_requests if r[1] == "/file/v1/fileHandle/batch")
+            self.assertEqual(entity_call[2], f"Bearer {TEST_TOKEN}")
+            self.assertEqual(batch_call[2], f"Bearer {TEST_TOKEN}")
+            meta_file = (self.tmp / "synapse_ok" / "raw" / f"{syn_id}.synapse_metadata.json").read_text(encoding="utf-8")
+            self.assertNotIn("secret-s3-sig", meta_file)
+
+        with self.subTest("A Synapse .tar archive of per-chromosome files is downloaded, MD5-checked and combined"):
+            tar_buf = io.BytesIO()
+            hdr = "CHROM GENPOS ID ALLELE0 ALLELE1 A1FREQ INFO N TEST BETA SE CHISQ LOG10P EXTRA\n"
+            with tarfile.open(fileobj=tar_buf, mode="w") as tar:
+                for ch, row_txt in (("1", "1 50 1:1:C:T C T 0.2 0.9 100 ADD 0.2 0.1 4 1.3 NA\n"),
+                                    ("2", "2 80 2:1:G:A G A 0.1 0.9 100 ADD 0.1 0.1 1 0.5 NA\n")):
+                    gz = gzip.compress((hdr + row_txt).encode())
+                    ti = tarfile.TarInfo(f"prot/chr{ch}.gz")
+                    ti.size = len(gz)
+                    tar.addfile(ti, io.BytesIO(gz))
+            tar_bytes = tar_buf.getvalue()
+            tar_script: dict = {}
+            with ScriptedServer(tar_script) as server:
+                tar_script.update({
+                    "/repo/v1/entity/syn51365399/version/2": [(200, json.dumps({
+                        "id": "syn51365399", "name": "IL6_P05231_OID20101_v1_Cardiometabolic.tar", "versionNumber": 2,
+                        "dataFileHandleId": "fh_tar",
+                    }).encode(), {})],
+                    "/file/v1/fileHandle/batch": [(200, json.dumps({"requestedFiles": [{
+                        "fileHandleId": "fh_tar",
+                        "preSignedURL": f"{server.url}/s3/IL6_P05231_OID20101_v1_Cardiometabolic.tar",
+                        "fileHandle": {"id": "fh_tar", "fileName": "IL6_P05231_OID20101_v1_Cardiometabolic.tar",
+                                       "contentMd5": hashlib.md5(tar_bytes).hexdigest()},
+                    }]}).encode(), {})],
+                    "/s3/IL6_P05231_OID20101_v1_Cardiometabolic.tar": [(200, tar_bytes, {})],
+                })
+                env = {**os.environ, "SYNAPSE_API_ROOT": server.url, "SYNAPSE_TOKEN": TEST_TOKEN}
+                t_proc, t_rec = self.stage(self.row("syn51365399.2", "synapse", name="syn_tar", output_id="P05231_OID20101"), env=env)
+            self.assertEqual(t_proc.returncode, 0, t_proc.stderr)
+            self.assertTrue(t_rec["raw_path"].endswith("P05231_OID20101.combined.txt.gz"))
+            self.assertEqual(len(gzip.open(t_rec["raw_path"], "rt").read().splitlines()), 3)
+
+        with self.subTest("A missing Synapse token is a configuration error (exit 78)"):
+            env = {**os.environ, "SYNAPSE_API_ROOT": "http://127.0.0.1:9", "SYNAPSE_TOKEN": "", "SYNAPSE_AUTH_TOKEN": ""}
+            proc, _ = self.stage(self.row(syn_id, "synapse", name="syn_no_token"), env=env)
+            self.assertEqual(proc.returncode, 78, proc.stderr)
+            self.assertIn("SYNAPSE_TOKEN", proc.stderr)
+
+        for status in (401, 403):
+            with self.subTest(f"A rejected Synapse token (HTTP {status}) is a configuration error (exit 78)"):
+                with ScriptedServer({f"/repo/v1/entity/{syn_id}": [(status, b'{"reason": "invalid token"}', {})]}) as server:
+                    env = {**os.environ, "SYNAPSE_API_ROOT": server.url, "SYNAPSE_TOKEN": TEST_TOKEN}
+                    proc, _ = self.stage(self.row(syn_id, "synapse", name=f"syn_rejected_{status}"), env=env)
+                self.assertEqual(proc.returncode, 78, proc.stderr)
+                self.assertIn("invalid token", proc.stderr)
+                self.assertNotIn(TEST_TOKEN, proc.stderr + proc.stdout)
+
+        with self.subTest("A non-file or missing Synapse entity fails only that row (exit 65)"):
+            folder_resp = json.dumps({"id": "syn1", "concreteType": "org.sagebionetworks.repo.model.Folder"}).encode()
+            with ScriptedServer({"/repo/v1/entity/syn1": [(200, folder_resp, {})],
+                                 "/repo/v1/entity/syn2": [(404, b'{"reason": "not found"}', {})]}) as server:
+                env = {**os.environ, "SYNAPSE_API_ROOT": server.url, "SYNAPSE_TOKEN": TEST_TOKEN}
+                p_folder, _ = self.stage(self.row("syn1", "synapse", name="syn_folder"), env=env)
+                p_404, _ = self.stage(self.row("syn2", "synapse", name="syn_404"), env=env)
+            self.assertEqual((p_folder.returncode, p_404.returncode), (65, 65))
+
+        with self.subTest("list_synapse_children paginates across nextPageToken"):
+            pages = [
+                (200, json.dumps({"page": [{"id": "syn10", "name": "A.tar", "versionNumber": 1}], "nextPageToken": "tok2"}).encode(), {}),
+                (200, json.dumps({"page": [{"id": "syn11", "name": "B.tar", "versionNumber": 1}]}).encode(), {}),
+            ]
+            with ScriptedServer({"/repo/v1/entity/children": pages}) as server, \
+                    mock.patch.dict(os.environ, {"SYNAPSE_API_ROOT": server.url, "SYNAPSE_TOKEN": TEST_TOKEN}):
+                items = download_synapse.list_synapse_children("syn999")
+            self.assertEqual([(x["synapse_id"], x["file"]) for x in items], [("syn10", "A.tar"), ("syn11", "B.tar")])
 
         # --- URLs ---------------------------------------------------------------------------------------------
         with self.subTest("URLs are downloaded"):

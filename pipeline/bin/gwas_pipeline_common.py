@@ -112,6 +112,9 @@ ANCESTRY_SYNONYMS = {
 # OpenGWAS dataset IDs: <batch>-<sub-batch>-<identifier>, e.g. ieu-b-5129, ukb-d-30780_irnt, ebi-a-GCST90000123.
 OPENGWAS_ID_PATTERN = r"[a-z]+-[a-z]-[A-Za-z0-9_]+"
 
+# Synapse entity IDs: syn<digits>, optionally pinned to a version (e.g. syn51365303 or syn51365303.1).
+SYNAPSE_ID_PATTERN = r"syn\d+(?:\.\d+)?"
+
 
 class LinkParser(html.parser.HTMLParser):
     def __init__(self) -> None:
@@ -174,6 +177,18 @@ def opengwas_dataset_id(location: str) -> str | None:
     return match.group(1) if match else None
 
 
+def synapse_entity_id(location: str) -> str | None:
+    """Return the Synapse ID (e.g. syn51365303 or syn51365303.1) in a bare ID or Synapse URL, in lowercase."""
+    text = str(location).strip()
+    if re.fullmatch(SYNAPSE_ID_PATTERN, text, flags=re.I):
+        return text.lower()
+    if "synapse.org" in text.lower():
+        matches = re.findall(rf"(?:^|[:/#])({SYNAPSE_ID_PATTERN})(?=$|[/?#])", text, flags=re.I)
+        if matches:
+            return matches[-1].lower()
+    return None
+
+
 def infer_source_type(location: str) -> str:
     loc = str(location).strip()
     lower = loc.lower()
@@ -181,8 +196,12 @@ def infer_source_type(location: str) -> str:
         return "gwas_catalog"
     if "opengwas.io/datasets/" in lower or "gwas.mrcieu.ac.uk/datasets/" in lower:
         return "opengwas"
+    if "synapse.org/" in lower and synapse_entity_id(loc):
+        return "synapse"
     if lower.startswith(("http://", "https://", "ftp://")):
         return "direct_url"
+    if re.fullmatch(SYNAPSE_ID_PATTERN, loc, flags=re.I) and not Path(loc).exists():
+        return "synapse"
     if re.fullmatch(OPENGWAS_ID_PATTERN, loc) and not Path(loc).exists():
         return "opengwas"
     return "local"
@@ -197,6 +216,8 @@ def normalize_source_type(source_type: str) -> str:
         "catalogue": "gwas_catalog",
         "opengwas": "opengwas",
         "open_gwas": "opengwas",
+        "synapse": "synapse",
+        "syn": "synapse",
         "direct": "direct_url",
         "directurl": "direct_url",
         "url": "direct_url",
@@ -214,6 +235,8 @@ def extract_accession_or_basename(location: str, source_type: str) -> str:
         return match.group(0).upper() if match else "gwas_catalog"
     if source_type == "opengwas":
         return opengwas_dataset_id(location) or "opengwas"
+    if source_type == "synapse":
+        return synapse_entity_id(location) or "synapse"
     parsed = urllib.parse.urlparse(location)
     name = Path(parsed.path).name if parsed.path else Path(location).name
     if not name:
@@ -247,11 +270,12 @@ def output_id_from_row(row: dict[str, str], source_type: str) -> str:
     prefix = {
         "gwas_catalog": "GWAScatalog",
         "opengwas": "openGWAS",
+        "synapse": "synapse",
         "direct_url": "directURL",
         "local": "local",
     }.get(source_type, source_type)
     unique_id = safe_path_component(source_id)
-    if source_type not in {"gwas_catalog", "opengwas"}:
+    if source_type not in {"gwas_catalog", "opengwas", "synapse"}:
         unique_id = f"{unique_id}_{short_hash(row['GWAS_location'], 8)}"
     return f"{prefix}_{unique_id}"
 

@@ -52,7 +52,8 @@ def sandbox_env(tmp: Path, *bin_dirs: Path, **extra: str) -> dict:
         write_stub(python_dir, "python3", f'exec "{sys.executable}" "$@"\n')
     path = [*map(str, bin_dirs), str(guard), str(bash_dir), str(python_dir), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     env = {k: v for k, v in os.environ.items()
-           if not k.startswith(("GWAS_", "SLURM_", "NEXTFLOW", "GWASPROCESSING_", "PLINK2", "BCFTOOLS", "MAMBA"))}
+           if not k.startswith(("GWAS_", "SLURM_", "NEXTFLOW", "GWASPROCESSING_", "PLINK2", "BCFTOOLS", "MAMBA",
+                                "OPENGWAS_", "SYNAPSE_"))}
     env.update({"PATH": os.pathsep.join(path)})
     env.update(extra)
     return env

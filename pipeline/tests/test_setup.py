@@ -54,7 +54,7 @@ def sandbox_env(tmp: Path, *bin_dirs: Path, **extra: str) -> dict:
     path = [*map(str, bin_dirs), str(guard), str(bash_dir), str(python_dir), "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("GWAS_", "SLURM_", "NEXTFLOW", "GWASPROCESSING_", "PLINK2", "BCFTOOLS", "MAMBA",
-                                "OPENGWAS_"))}
+                                "OPENGWAS_", "SYNAPSE_"))}
     env.update({"PATH": os.pathsep.join(path), "PIP_NO_INDEX": "1", "PIP_DISABLE_PIP_VERSION_CHECK": "1"})
     env.update(extra)
     return env

@@ -153,9 +153,10 @@ class ManifestTest(unittest.TestCase):
             self.assertIn("row 3: population 'CEU' must be ALL, AFR, AMR, EAS, EUR or SAS", proc.stderr)
             self.assertNotIn("row 2", proc.stderr)
 
-        with self.subTest("source_type must be gwas_catalog, opengwas, direct_url or local"):
+        with self.subTest("source_type must be gwas_catalog, opengwas, synapse, direct_url or local"):
             for given, expected in {"gwas_catalog": "gwas_catalog", "GWAS Catalog": "gwas_catalog", "opengwas": "opengwas",
-                                    "direct_url": "direct_url", "url": "direct_url", "local": "local"}.items():
+                                    "synapse": "synapse", "syn": "synapse", "direct_url": "direct_url", "url": "direct_url",
+                                    "local": "local"}.items():
                 self.assertEqual(common.normalize_source_type(given), expected, given)
             c = case()
             c.manifest(f"{RAW}\tBMI\tEUR\tLocke\t2015\t25673413\tdropbox\n", HEADER.rstrip("\n") + "\tsource_type\n")
@@ -163,15 +164,17 @@ class ManifestTest(unittest.TestCase):
             self.assert_rejected(c, proc, run=0)
             self.assertIn("unsupported source_type 'dropbox'", proc.stderr)
 
-        with self.subTest("a GWAS Catalog or OpenGWAS row must carry its accession or dataset ID"):
+        with self.subTest("a GWAS Catalog, OpenGWAS or Synapse row must carry its accession, dataset ID or Synapse ID"):
             c = case()
             c.manifest("https://example.org/no-accession\tBMI\tEUR\tLocke\t2015\t25673413\tgwas_catalog\n"
-                       "https://example.org/no-dataset\tWHR\tEUR\tPulit\t2018\t30239722\topengwas\n",
+                       "https://example.org/no-dataset\tWHR\tEUR\tPulit\t2018\t30239722\topengwas\n"
+                       "https://example.org/no-synapse\tIL6\tALL\tSun\t2023\t37794186\tsynapse\n",
                        HEADER.rstrip("\n") + "\tsource_type\n")
             proc = c.prepare(check=False)
             self.assert_rejected(c, proc, run=0)
             self.assertIn("row 2: no GWAS Catalog accession", proc.stderr)
             self.assertIn("row 3: no OpenGWAS dataset ID", proc.stderr)
+            self.assertIn("row 4: no Synapse ID", proc.stderr)
 
         with self.subTest("every optional column is preserved in the run manifest and the row JSON"):
             c = case()
@@ -277,10 +280,29 @@ class ManifestTest(unittest.TestCase):
             cases = {"https://www.ebi.ac.uk/gwas/studies/GCST002783": "gwas_catalog", "GCST002783": "gwas_catalog",
                      "gcst002783": "gwas_catalog", "https://opengwas.io/datasets/ebi-a-GCST002783": "opengwas",
                      "https://gwas.mrcieu.ac.uk/datasets/ieu-a-2/": "opengwas", "ebi-a-GCST002783": "opengwas",
+                     "syn51365303": "synapse", "SYN51365303.1": "synapse",
+                     "https://www.synapse.org/#!Synapse:syn51365303": "synapse",
+                     "https://www.synapse.org/Synapse:syn51365303": "synapse",
+                     "https://www.synapse.org/#!Synapse:syn51364943/files/syn51365303": "synapse",
                      "https://example.org/sumstats/gwas.tsv.gz": "direct_url", "ftp://example.org/gwas.txt.gz": "direct_url",
-                     str(RAW): "local", "data/gwas.tsv": "local"}
+                     str(RAW): "local", "data/gwas.tsv": "local", "data/syn51365303.tar": "local"}
             for location, expected in cases.items():
                 self.assertEqual(common.infer_source_type(location), expected, location)
+
+        with self.subTest("Synapse IDs and URLs normalise to lowercase syn<digits>[.<version>]"):
+            self.assertEqual(common.synapse_entity_id("SYN51365303"), "syn51365303")
+            self.assertEqual(common.synapse_entity_id("syn51365303.2"), "syn51365303.2")
+            self.assertEqual(common.synapse_entity_id("https://www.synapse.org/#!Synapse:syn51364943/files/syn51365303"), "syn51365303")
+            self.assertIsNone(common.synapse_entity_id("/tmp/syn51365303.tar"))
+            here = base / "named_like_synapse"
+            here.mkdir()
+            (here / "syn51365303").write_text(RAW.read_text(encoding="utf-8"), encoding="utf-8")
+            cwd = os.getcwd()
+            os.chdir(here)
+            try:
+                self.assertEqual(common.infer_source_type("syn51365303"), "local")
+            finally:
+                os.chdir(cwd)
 
         with self.subTest("OpenGWAS IDs with text or suffixes are recognised and keep their case"):
             for dataset in ["ieu-b-5129", "ukb-d-30780_irnt", "ebi-a-GCST90000123", "finn-b-I9_HEARTFAIL", "met-d-LDL_C"]:
@@ -306,19 +328,21 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual((row["source_type"], row["GWAS_location"]), ("local", str((c.config_root / "ieu-a-2").resolve())))
             self.assertTrue(row["output_id"].startswith("local_ieu-a-2_"))
 
-        with self.subTest("output IDs name the source: GWAScatalog_, openGWAS_, directURL_ or local_"):
+        with self.subTest("output IDs name the source: GWAScatalog_, openGWAS_, synapse_, directURL_ or local_"):
             c = case()
             c.manifest("https://www.ebi.ac.uk/gwas/studies/gcst002783\tBMI\tALL\tLocke\t2015\t25673413\n"
                        "https://opengwas.io/datasets/ebi-a-GCST002783\tBMI\tALL\tLocke\t2015\t25673413\n"
+                       "https://www.synapse.org/#!Synapse:SYN51365303\tIL6\tALL\tSun\t2023\t37794186\n"
                        "https://example.org/sumstats/bmi.tsv.gz\tBMI\tALL\tLocke\t2015\t25673413\n"
                        f"{RAW}\tBMI\tALL\tLocke\t2015\t25673413\n")
             c.prepare()
             rows = c.rows()
-            self.assertEqual([r["source_type"] for r in rows], ["gwas_catalog", "opengwas", "direct_url", "local"])
+            self.assertEqual([r["source_type"] for r in rows], ["gwas_catalog", "opengwas", "synapse", "direct_url", "local"])
             self.assertEqual(rows[0]["output_id"], "GWAScatalog_GCST002783")
             self.assertEqual(rows[1]["output_id"], "openGWAS_ebi-a-GCST002783")
-            self.assertRegex(rows[2]["output_id"], r"^directURL_bmi_[0-9a-f]{8}$")
-            self.assertRegex(rows[3]["output_id"], r"^local_generic_[0-9a-f]{8}$")
+            self.assertEqual(rows[2]["output_id"], "synapse_syn51365303")
+            self.assertRegex(rows[3]["output_id"], r"^directURL_bmi_[0-9a-f]{8}$")
+            self.assertRegex(rows[4]["output_id"], r"^local_generic_[0-9a-f]{8}$")
 
         with self.subTest("author, year and PMID name the study folder, which holds standardise/<output ID>/"):
             self.assertEqual(common.study_id_from_row({"author": "Locke ", "year": "2015", "PMID": "PMID:25673413"}),
