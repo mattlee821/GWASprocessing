@@ -284,7 +284,16 @@ The study YAML and a manifest script for each of 4 protein studies are in `manif
 | Sun 2023 (PMID 37794186), UKB-PPP Olink | `sun_2023_37794186.yaml` | `make_sun_manifest.R` | the per-protein `.tar` files (1 table per chromosome) and the Olink protein maps from Synapse |
 | Zhang 2022 (PMID 35501419), ARIC SomaScan cis-pGWAS | `zhang_2022_35501419.yaml` | `make_zhang_manifest.R` | the per-protein `.glm.linear` files; the genomic inflation flag is left out (cis windows only) |
 
-A manifest script writes the manifest for your own folder of files (`Rscript manifests/make_ferkingstad_manifest.R --files FOLDER --out manifests/ferkingstad.tsv`; the header of each script lists its options). The output is named `UNIPROT_SEQID` (SomaScan) or `UNIPROT_OLINKID` (Olink), for example `P03951_2190-55` and `P03951_OID30773`, with the UniProt accession taken from the Olink protein maps for Olink and, for SomaScan, from the dataset `somalogic_seqid_uniprot_current` of the public R package [usefuldata](https://github.com/mattlee821/usefuldata) (`remotes::install_github("mattlee821/usefuldata")`, documentation at https://mattlee821.github.io/usefuldata), which gives the most recent UniProt accession for each SeqId, with retired accessions replaced. The package is needed only to write the SomaScan manifests; it is not part of the pipeline's install or image. The manifest rows carry the paths of your files, so keep your manifests local: only these YAMLs and scripts are tracked.
+A manifest script writes the manifest for your own folder of files (`Rscript manifests/make_ferkingstad_manifest.R --files FOLDER --out manifests/ferkingstad.tsv`, or `--synapse-folder SYN_ID` for Pietzner and Sun; the header of each script lists its options). The output is named `UNIPROT_SEQID` (SomaScan) or `UNIPROT_OLINKID` (Olink), for example `P03951_2190-55` and `P03951_OID30773`, with the UniProt accession taken from the Olink protein maps for Olink and, for SomaScan, from the dataset `somalogic_seqid_uniprot_current` of the public R package [usefuldata](https://github.com/mattlee821/usefuldata) (`remotes::install_github("mattlee821/usefuldata")`, documentation at https://mattlee821.github.io/usefuldata), which gives the most recent UniProt accession for each SeqId, with retired accessions replaced. The package is needed only to write the SomaScan manifests; it is not part of the pipeline's install or image. The manifest rows carry the paths of your files, so keep your manifests local: only these YAMLs and scripts are tracked.
+
+When disk space is too tight to hold every standardised VCF of a protein study at once, `src/batches.sh` splits a study manifest into fixed batches (`batch_01.tsv`, `batch_02.tsv`, ...), reports which batches are pending, standardised or purged, cleans per-row staged raw files before downstream analysis, and deletes a batch's VCFs once downstream outputs are exported while keeping `.qc.json` and `.metadata.json` for `manifest.html`:
+
+```bash
+bash src/batches.sh split     --manifest manifests/sun_combined.tsv --out-dir manifests/sun_batches --size 100
+bash src/batches.sh status    --batches manifests/sun_batches
+bash src/batches.sh clean-raw --batches manifests/sun_batches --batch 01 --clean-temp
+bash src/batches.sh purge     --batches manifests/sun_batches --batch 01 --export-dir /path/to/exports
+```
 
 ### Check a protein across studies
 
