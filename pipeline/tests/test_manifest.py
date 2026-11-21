@@ -582,6 +582,31 @@ class ManifestTest(unittest.TestCase):
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             self.assertEqual((summary["updated"], summary["ignored"]), (0, 0))
 
+        with self.subTest("signed URL tokens are stripped from hashes and run manifests while preserved for download"):
+            u1 = "https://download.decode.is/s3/download?token=secretA&file=10000_28_CRYBB2_CRBB2.txt.gz"
+            u2 = "https://download.decode.is/s3/download?token=secretB&file=10000_28_CRYBB2_CRBB2.txt.gz"
+            clean = "https://download.decode.is/s3/download?file=10000_28_CRYBB2_CRBB2.txt.gz"
+            self.assertEqual(common.strip_url_secrets(u1), clean)
+            self.assertEqual(common.strip_url_secrets(u2), clean)
+            r1 = {"GWAS_location": u1, "phenotype": "CRYBB2", "ancestry": "EUR", "author": "Ferkingstad", "year": "2021", "PMID": "34857953"}
+            r2 = {**r1, "GWAS_location": u2}
+            self.assertEqual(common.row_hash(r1), common.row_hash(r2))
+            self.assertEqual(common.settings_fingerprint(r1, {}, reference), common.settings_fingerprint(r2, {}, reference))
+            self.assertEqual(common.output_id_from_row(r1, "direct_url"), common.output_id_from_row(r2, "direct_url"))
+            self.assertIn("10000_28_CRYBB2_CRBB2", common.output_id_from_row(r1, "direct_url"))
+            c = case()
+            c.manifest(f"{u1}\tCRYBB2\tEUR\tFerkingstad\t2021\t34857953\n")
+            c.prepare()
+            self.assertEqual(c.rows()[0]["GWAS_location"], clean)
+            self.assertNotIn("secretA", (c.dir / "run.tsv").read_text(encoding="utf-8"))
+            self.assertEqual(c.row_jsons()[0]["GWAS_location"], clean)
+            self.assertEqual(c.row_jsons()[0]["download_url"], u1)
+            c.complete(c.row_jsons()[0])
+            c.manifest(f"{u2}\tCRYBB2\tEUR\tFerkingstad\t2021\t34857953\n")
+            c.prepare()
+            self.assertEqual(c.summary()["rows_skipped_complete"], 1)
+            self.assertEqual(c.summary()["rows_to_run"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

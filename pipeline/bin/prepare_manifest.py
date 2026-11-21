@@ -43,6 +43,7 @@ from gwas_pipeline_common import (
     sanitize,
     settings_fingerprint,
     state_row_complete,
+    strip_url_secrets,
     study_id_from_row,
     synapse_entity_id,
     write_json,
@@ -138,9 +139,13 @@ def main() -> None:
         source_type = normalize_source_type(row["source_type"]) if row.get("source_type") else infer_source_type(row["GWAS_location"])
         row_errors = validate_row(row, line, source_type)
         original_location = row["GWAS_location"]
+        public_location = strip_url_secrets(original_location)
         if source_type == "local":
             row["GWAS_location"] = resolve_local_location(original_location, repo_root, manifest.parent)
-        output_id = output_id_from_row({**row, "GWAS_location": original_location}, source_type)
+            public_location = row["GWAS_location"]
+        else:
+            row["GWAS_location"] = public_location
+        output_id = output_id_from_row({**row, "GWAS_location": strip_url_secrets(original_location)}, source_type)
         standardise_dir = work_root / study_id / "standardise" / output_id
         output_name = str(row.get("output_name", "") or "").strip()
         output_prefix = standardise_dir / (output_name if output_name and valid_output_name(output_name) else "standardised")
@@ -150,9 +155,11 @@ def main() -> None:
             continue
         seen_outputs[str(output_prefix)] = line
         out_row: dict[str, Any] = {col: row.get(col, "") for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}
+        if source_type != "local" and public_location != original_location:
+            out_row["download_url"] = original_location
         out_row.update({
             "source_type": source_type, "study_id": study_id, "output_id": output_id,
-            "row_hash": row_hash({**row, "GWAS_location": original_location}),
+            "row_hash": row_hash({**row, "GWAS_location": strip_url_secrets(original_location)}),
             "raw_dir": str(work_root / study_id / "raw" / output_id), "standardise_dir": str(standardise_dir),
             "output_prefix": str(output_prefix),
         })

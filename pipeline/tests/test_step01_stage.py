@@ -407,14 +407,22 @@ class Step01StageTest(unittest.TestCase):
             self.assertEqual([(x["synapse_id"], x["file"]) for x in items], [("syn10", "A.tar"), ("syn11", "B.tar")])
 
         # --- URLs ---------------------------------------------------------------------------------------------
-        with self.subTest("URLs are downloaded"):
+        with self.subTest("URLs are downloaded, including query-parameter file names (?file=X.txt.gz)"):
             served = self.tmp / "served_url"
             served.mkdir()
             shutil.copy(EXAMPLES / "tables/generic.tsv", served / "generic.tsv")
             with LocalHttpServer(served) as server:
                 proc, record = self.stage(self.row(f"{server.url}/generic.tsv", "direct_url", name="url"))
+                signed_row = self.row(f"{server.url}/generic.tsv?file=generic.tsv", "direct_url", name="signed_url",
+                                      download_url=f"{server.url}/generic.tsv?token=secret123&file=generic.tsv")
+                proc2, record2 = self.stage(signed_row)
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertEqual(Path(record["raw_path"]).read_bytes(), (EXAMPLES / "tables/generic.tsv").read_bytes())
+            self.assertEqual(proc2.returncode, 0, proc2.stderr)
+            self.assertNotIn("secret123", json.dumps(record2))
+            self.assertEqual(common.guess_filename_from_url(
+                "https://download.decode.is/s3/download?token=abc&file=10000_28_CRYBB2_CRBB2.txt.gz"),
+                "10000_28_CRYBB2_CRBB2.txt.gz")
 
         with self.subTest("URL downloads are checked by gzip integrity"):
             served = self.tmp / "served_gz"

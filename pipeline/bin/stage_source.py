@@ -31,6 +31,7 @@ from gwas_pipeline_common import (
     read_json,
     resolve_row_config,
     sanitize_filename,
+    strip_url_secrets,
     write_json,
 )
 
@@ -170,7 +171,7 @@ def main() -> None:
     ensure_dir(row["standardise_dir"])
     dry_run = parse_bool(args.dry_run)
     source_type = row["source_type"]
-    location = row["GWAS_location"]
+    location = row.get("download_url") or row["GWAS_location"]
     config = resolve_row_config(args.config_root, row, args.study_yaml)
     metadata: dict = {"source_type": source_type, "dry_run": dry_run, "config": config.get("_config_path", "")}
 
@@ -230,6 +231,7 @@ def main() -> None:
         raise data_error(f"Unsupported source_type '{source_type}' for {location}")
 
     record = {col: row.get(col, "") for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}
+    record["GWAS_location"] = strip_url_secrets(record["GWAS_location"])
     record.update({
         "study_id": row["study_id"], "output_id": row["output_id"], "row_hash": row["row_hash"], "source_type": source_type,
         "raw_dir": str(raw_dir), "standardise_dir": row["standardise_dir"], "output_prefix": row["output_prefix"],

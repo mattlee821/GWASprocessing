@@ -6,8 +6,8 @@
 #       [--location-dir DIR] [--usefuldata PATH] [--st01 ST01_aptamers.tsv] [--yaml manifests/ferkingstad_2021_34857953.yaml]
 #       [--limit N]
 #
-#   --files         a folder of the per-protein files (<SeqId>_<Gene>_<Protein>.txt.gz), or a text file listing their names
-#   --location-dir  folder written into GWAS_location (default: --files when it is a folder)
+#   --files         a folder of the per-protein files (<SeqId>_<Gene>_<Protein>.txt.gz), or a text file listing their names or HTTPS URLs
+#   --location-dir  folder written into GWAS_location for plain filename lists (default: --files when it is a folder)
 #   --usefuldata    path of the usefuldata package (default: the installed package; install it with remotes::install_github("mattlee821/usefuldata"))
 #   --st01          the paper's Supplementary Table 1 as a tab-separated file, to report where its UniProt differs
 #   --limit         the first N files in SeqId order (a subset to test)
@@ -27,8 +27,6 @@ option <- function(name, default = NA_character_) {
 files_arg <- option("files")
 out <- option("out")
 if (is.na(files_arg) || is.na(out)) stop("Usage: --files DIR_OR_LIST --out MANIFEST.tsv (see the header of this script)", call. = FALSE)
-location_dir <- option("location-dir", if (dir.exists(files_arg)) normalizePath(files_arg) else NA_character_)
-if (is.na(location_dir)) stop("--location-dir is needed when --files is a list", call. = FALSE)
 yaml <- option("yaml", "manifests/ferkingstad_2021_34857953.yaml")
 st01_path <- option("st01")
 limit <- as.integer(option("limit", NA_character_))
@@ -53,13 +51,33 @@ if (is.na(package_path) && requireNamespace("usefuldata", quietly = TRUE)) {
 mapping$key <- gsub("-", "_", mapping$SeqId)
 
 # the files ====
-file_names <- if (dir.exists(files_arg)) list.files(files_arg, pattern = "\\.txt\\.gz$") else
-  basename(trimws(readLines(files_arg)[nzchar(trimws(readLines(files_arg)))]))
-file_names <- file_names[grepl("\\.txt\\.gz$", file_names)]
+urls <- NULL
+if (dir.exists(files_arg)) {
+  file_names <- list.files(files_arg, pattern = "\\.txt\\.gz$")
+} else {
+  raw_lines <- trimws(readLines(files_arg))
+  raw_lines <- raw_lines[nzchar(raw_lines) & !startsWith(raw_lines, "#")]
+  if (length(raw_lines) > 0L && all(grepl("^https?://", raw_lines, ignore.case = TRUE))) {
+    urls <- raw_lines
+    has_qfile <- grepl("[?&](filename|file|download)=[^&]+", raw_lines, ignore.case = TRUE)
+    file_names <- ifelse(has_qfile,
+                         basename(utils::URLdecode(sub("^.*[?&](?:filename|file|download)=([^&]+).*$", "\\1", raw_lines))),
+                         basename(sub("\\?.*$", "", raw_lines)))
+  } else {
+    file_names <- basename(raw_lines)
+  }
+}
+is_txtgz <- grepl("\\.txt\\.gz$", file_names)
+file_names <- file_names[is_txtgz]
+if (!is.null(urls)) urls <- urls[is_txtgz]
+location_dir <- option("location-dir", if (dir.exists(files_arg)) normalizePath(files_arg) else NA_character_)
+if (is.null(urls) && is.na(location_dir)) stop("--location-dir is needed when --files is a plain filename list", call. = FALSE)
+
 parsed <- regmatches(file_names, regexec("^([0-9]+_[0-9]+)_.+\\.txt\\.gz$", file_names))
 has_seqid <- lengths(parsed) == 2L
 not_written <- data.frame(file = file_names[!has_seqid], reason = rep("no SeqId at the start of the file name", sum(!has_seqid)))
 files <- data.frame(file = file_names[has_seqid], key = vapply(parsed[has_seqid], `[`, character(1), 2L), stringsAsFactors = FALSE)
+if (!is.null(urls)) files$url <- urls[has_seqid]
 files <- files[order(as.integer(sub("_.*", "", files$key)), as.integer(sub(".*_", "", files$key))), , drop = FALSE]
 if (!is.na(limit)) files <- head(files, limit)
 if (anyDuplicated(files$key)) stop("Two files share a SeqId: ", paste(files$key[duplicated(files$key)], collapse = ", "), call. = FALSE)
@@ -77,11 +95,12 @@ if (anyDuplicated(names_table$output_name[ok])) stop("Two files get the same out
 
 # the manifest ====
 manifest <- data.frame(
-  GWAS_location = file.path(location_dir, names_table$file[ok]),
+  GWAS_location = if ("url" %in% names(names_table)) names_table$url[ok] else file.path(location_dir, names_table$file[ok]),
   phenotype = paste0(ifelse(is.na(names_table$TargetFullName[ok]), names_table$Target[ok], names_table$TargetFullName[ok]),
                      " plasma protein level (SomaScan aptamer ", names_table$SeqId[ok], ")"),
   ancestry = "EUR", sex = "combined", author = "Ferkingstad", year = "2021", PMID = "34857953",
-  source_type = "local", input_build = "hg38", population = "EUR", delimiter = "tab", format = "table",
+  source_type = if ("url" %in% names(names_table)) "direct_url" else "local",
+  input_build = "hg38", population = "EUR", delimiter = "tab", format = "table",
   study_yaml = yaml, output_name = names_table$output_name[ok],
   stringsAsFactors = FALSE
 )

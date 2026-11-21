@@ -234,6 +234,29 @@ def normalize_source_type(source_type: str) -> str:
     return aliases.get(source, source)
 
 
+SECRET_QUERY_KEYS = frozenset({
+    "token", "access_token", "auth_token", "id_token", "apikey", "api_key",
+    "signature", "x-amz-algorithm", "x-amz-credential", "x-amz-date", "x-amz-expires",
+    "x-amz-security-token", "x-amz-signature", "x-amz-signedheaders",
+    "x-goog-algorithm", "x-goog-credential", "x-goog-date", "x-goog-expires",
+    "x-goog-signature", "x-goog-signedheaders",
+})
+
+
+def strip_url_secrets(location: str) -> str:
+    """Drop ephemeral credential/signature query parameters (e.g. deCODE ?token=... or S3 presigned params)
+    so row/settings hashes stay stable across token renewals and secrets are never persisted in state or metadata."""
+    text = str(location if location is not None else "").strip()
+    if "?" not in text or not text.lower().startswith(("http://", "https://", "ftp://")):
+        return text
+    parsed = urllib.parse.urlparse(text)
+    pairs = urllib.parse.parse_qsl(parsed.query, keep_blank_values=True)
+    kept = [(k, v) for k, v in pairs if k.lower() not in SECRET_QUERY_KEYS]
+    if len(kept) == len(pairs):
+        return text
+    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(kept, doseq=True)))
+
+
 def extract_accession_or_basename(location: str, source_type: str) -> str:
     if source_type == "gwas_catalog":
         match = re.search(r"GCST\d+", location, flags=re.I)
@@ -243,7 +266,7 @@ def extract_accession_or_basename(location: str, source_type: str) -> str:
     if source_type == "synapse":
         return synapse_entity_id(location) or "synapse"
     parsed = urllib.parse.urlparse(location)
-    name = Path(parsed.path).name if parsed.path else Path(location).name
+    name = guess_filename_from_url(location, "") if parsed.query else (Path(parsed.path).name if parsed.path else Path(location).name)
     if not name:
         name = source_type
     for suffix in [".tsv.gz", ".txt.gz", ".tbl.gz", ".csv.gz", ".vcf.gz", ".tsv", ".txt", ".tbl", ".csv", ".vcf", ".gz", ".zip", ".tar"]:
@@ -271,7 +294,8 @@ def output_id_from_row(row: dict[str, str], source_type: str) -> str:
     name = str(row.get("output_name", "") or "").strip()
     if name and valid_output_name(name):
         return name
-    source_id = extract_accession_or_basename(row["GWAS_location"], source_type)
+    clean_location = strip_url_secrets(row["GWAS_location"])
+    source_id = extract_accession_or_basename(clean_location, source_type)
     prefix = {
         "gwas_catalog": "GWAScatalog",
         "opengwas": "openGWAS",
@@ -281,12 +305,13 @@ def output_id_from_row(row: dict[str, str], source_type: str) -> str:
     }.get(source_type, source_type)
     unique_id = safe_path_component(source_id)
     if source_type not in {"gwas_catalog", "opengwas", "synapse"}:
-        unique_id = f"{unique_id}_{short_hash(row['GWAS_location'], 8)}"
+        unique_id = f"{unique_id}_{short_hash(clean_location, 8)}"
     return f"{prefix}_{unique_id}"
 
 
 def row_hash(row: dict[str, str]) -> str:
     payload = {col: str(row.get(col, "")).strip() for col in MANIFEST_COLUMNS}
+    payload["GWAS_location"] = strip_url_secrets(payload["GWAS_location"])
     payload.update({col: str(row.get(col, "")).strip() for col in MANIFEST_OPTIONAL_COLUMNS if str(row.get(col, "")).strip()})
     explicit_study = str(row.get("study_id", "") or "").strip()
     if explicit_study and explicit_study != default_study_id(row):
@@ -526,6 +551,7 @@ def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
 def settings_fingerprint(record: dict[str, Any], config: dict[str, Any], reference_root: str | Path) -> str:
     """Hash of everything that determines a row's outputs; a mismatch means the outputs are stale."""
     row_payload = {col: str(record.get(col, "") or "").strip() for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}
+    row_payload["GWAS_location"] = strip_url_secrets(row_payload["GWAS_location"])
     explicit_study = str(record.get("study_id", "") or "").strip()
     if explicit_study and explicit_study != default_study_id(record):
         row_payload["study_id"] = explicit_study
@@ -576,13 +602,15 @@ def url_links(url: str) -> list[str]:
 
 def guess_filename_from_url(url: str, fallback: str = "downloaded_gwas") -> str:
     parsed = urllib.parse.urlparse(url)
-    name = Path(parsed.path).name
-    if name:
-        return urllib.parse.unquote(name)
     query = urllib.parse.parse_qs(parsed.query)
     for key in ["filename", "file", "download"]:
         if query.get(key):
-            return Path(query[key][0]).name
+            candidate = Path(urllib.parse.unquote(query[key][0])).name
+            if candidate:
+                return candidate
+    name = Path(parsed.path).name
+    if name:
+        return urllib.parse.unquote(name)
     return fallback
 
 
@@ -602,10 +630,10 @@ def download_url(url: str, out_dir: str | Path, filename: str | None = None, ret
                 expected_size = response.headers.get("Content-Length")
                 shutil.copyfileobj(response, handle)
             if part.stat().st_size == 0:
-                raise IOError(f"Downloaded empty file from {url}")
+                raise IOError(f"Downloaded empty file from {strip_url_secrets(url)}")
             if expected_size and part.stat().st_size != int(expected_size):
                 raise IOError(
-                    f"Incomplete download from {url}: expected {expected_size} bytes, got {part.stat().st_size}"
+                    f"Incomplete download from {strip_url_secrets(url)}: expected {expected_size} bytes, got {part.stat().st_size}"
                 )
             part.replace(out)
             return out

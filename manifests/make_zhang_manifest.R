@@ -1,12 +1,14 @@
 #!/usr/bin/env Rscript
-# Build the GWASprocessing manifest for the Zhang et al. 2022 (PMID 35501419) ARIC SomaScan cis-pGWAS (European American).
+# Build the GWASprocessing manifest for the Zhang et al. 2022 (PMID 35501419) ARIC SomaScan cis-pGWAS.
 #
 # Usage:
-#   Rscript manifests/make_zhang_manifest.R --files DIR_OR_LIST --out manifests/zhang_ea.tsv
-#       [--location-dir DIR] [--usefuldata PATH] [--st01 seqid.txt] [--yaml manifests/zhang_2022_35501419.yaml]
-#       [--limit N]
+#   Rscript manifests/make_zhang_manifest.R --files DIR_OR_LIST --out manifests/zhang_EUR.tsv
+#       [--ancestry EUR] [--study-id ID] [--location-dir DIR] [--usefuldata PATH] [--st01 seqid.txt]
+#       [--yaml manifests/zhang_2022_35501419.yaml] [--limit N]
 #
 #   --files         a folder of the per-protein files (SeqId_<a>_<b>.PHENO1.glm.linear), or a text file listing their names
+#   --ancestry      manifest ancestry: EUR (or EA / european, default) or AFR (or AA / african)
+#   --study-id      output study folder name (default zhang_2022_35501419_<POP>, e.g. zhang_2022_35501419_EUR or zhang_2022_35501419_AFR)
 #   --location-dir  folder written into GWAS_location (default: --files when it is a folder)
 #   --usefuldata    path of the usefuldata package (default: the installed package; install it with remotes::install_github("mattlee821/usefuldata"))
 #   --st01          the study's seqid.txt (seqid_in_sample, uniprot_id, entrezgenesymbol, ...), to report where its UniProt differs
@@ -30,6 +32,12 @@ if (is.na(files_arg) || is.na(out)) stop("Usage: --files DIR_OR_LIST --out MANIF
 location_dir <- option("location-dir", if (dir.exists(files_arg)) normalizePath(files_arg) else NA_character_)
 if (is.na(location_dir)) stop("--location-dir is needed when --files is a list", call. = FALSE)
 yaml <- option("yaml", "manifests/zhang_2022_35501419.yaml")
+ancestry_arg <- option("ancestry", "EUR")
+pop_code <- switch(tolower(ancestry_arg),
+                   "eur" = "EUR", "ea" = "EUR", "european" = "EUR",
+                   "afr" = "AFR", "aa" = "AFR", "african" = "AFR", "african-american" = "AFR",
+                   stop("--ancestry for Zhang 2022 must be EUR (EA) or AFR (AA), got: ", ancestry_arg, call. = FALSE))
+study_id <- option("study-id", paste0("zhang_2022_35501419_", pop_code))
 st01_path <- option("st01")
 limit <- as.integer(option("limit", NA_character_))
 
@@ -80,9 +88,9 @@ manifest <- data.frame(
   GWAS_location = file.path(location_dir, names_table$file[ok]),
   phenotype = paste0(ifelse(is.na(names_table$TargetFullName[ok]), names_table$Target[ok], names_table$TargetFullName[ok]),
                      " plasma protein level, cis-pGWAS (SomaScan aptamer ", names_table$SeqId[ok], ")"),
-  ancestry = "EUR", sex = "combined", author = "Zhang", year = "2022", PMID = "35501419",
-  source_type = "local", input_build = "hg38", population = "EUR", delimiter = "tab", format = "table",
-  study_yaml = yaml, output_name = names_table$output_name[ok],
+  ancestry = pop_code, sex = "combined", author = "Zhang", year = "2022", PMID = "35501419",
+  source_type = "local", input_build = "hg38", population = pop_code, delimiter = "tab", format = "table",
+  study_yaml = yaml, output_name = names_table$output_name[ok], study_id = study_id,
   stringsAsFactors = FALSE
 )
 write.table(manifest, out, sep = "\t", quote = FALSE, row.names = FALSE)
