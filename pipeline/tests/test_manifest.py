@@ -623,6 +623,24 @@ class ManifestTest(unittest.TestCase):
             self.assertNotEqual(ids[0], ids[1])
             self.assertTrue(all("SeqId_" in x for x in ids), ids)
 
+        with self.subTest("completed outputs on disk from an interrupted run are recovered into state and skipped"):
+            c = case()
+            c.manifest(f"{RAW}\tBMI\tall\tLocke\t2015\t25673413\n")
+            c.prepare()
+            first = c.row_jsons()[0]
+            out_prefix = Path(first["output_prefix"])
+            out_prefix.parent.mkdir(parents=True, exist_ok=True)
+            out_prefix.with_suffix(".gwas.vcf.gz").write_text("vcf", encoding="utf-8")
+            Path(str(out_prefix.with_suffix(".gwas.vcf.gz")) + ".tbi").write_text("tbi", encoding="utf-8")
+            out_prefix.with_suffix(".metadata.json").write_text("{}", encoding="utf-8")
+            out_prefix.with_suffix(".report.html").write_text("<html/>", encoding="utf-8")
+            out_prefix.with_suffix(".qc.json").write_text(json.dumps({"settings_hash": first["settings_hash"]}), encoding="utf-8")
+            self.assertFalse(c.state_file.exists())
+            c.prepare()
+            self.assertEqual(c.summary()["rows_skipped_complete"], 1)
+            self.assertEqual(c.summary()["rows_to_run"], 0)
+            self.assertIn(first["row_hash"], common.read_state(c.state_file))
+
 
 if __name__ == "__main__":
     unittest.main()

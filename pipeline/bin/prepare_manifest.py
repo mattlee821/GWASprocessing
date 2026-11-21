@@ -28,14 +28,17 @@ from gwas_pipeline_common import (
     valid_output_name,
     SUPER_POPULATIONS,
     atomic_write_text,
+    file_lock,
     infer_source_type,
     normalize_build_value,
     normalize_source_type,
     opengwas_dataset_id,
     output_id_from_row,
     parse_bool,
+    read_json,
     read_manifest,
     read_state,
+    reference_identity,
     resolve_ancestry,
     resolve_row_config,
     row_hash,
@@ -46,7 +49,9 @@ from gwas_pipeline_common import (
     strip_url_secrets,
     study_id_from_row,
     synapse_entity_id,
+    utc_now,
     write_json,
+    write_state,
 )
 
 DERIVED_COLUMNS = ["study_id", "output_id", "row_hash", "raw_dir", "standardise_dir", "output_prefix", "settings_hash"]
@@ -123,7 +128,9 @@ def main() -> None:
     work_root, repo_root = Path(args.work_root), Path(args.repo_root)
     config_root = Path(args.config_root) if args.config_root else manifest.parent
     reference_root = Path(args.reference_root) if args.reference_root else repo_root / "references"
+    reference_files = reference_identity(reference_root)
     state = read_state(args.state_file)
+    recovered: dict[str, dict[str, str]] = {}
 
     errors: list[str] = []  # problems with the manifest as a whole: they stop the run before any row starts
     invalid: list[dict[str, Any]] = []  # rows that fail a check: listed as failed while the other rows run
@@ -172,7 +179,7 @@ def main() -> None:
         if row_errors:
             invalid.append({**out_row, "errors": row_errors})
             continue
-        out_row["settings_hash"] = settings_fingerprint(out_row, config, reference_root)
+        out_row["settings_hash"] = settings_fingerprint(out_row, config, reference_root, reference_files=reference_files)
         expected = {
             "standard_vcf": str(output_prefix.with_suffix(".gwas.vcf.gz")),
             "standard_index": str(output_prefix.with_suffix(".gwas.vcf.gz")) + ".tbi",
@@ -185,7 +192,25 @@ def main() -> None:
         if not force and previous and all(previous.get(k, "") == v for k, v in expected.items()) and state_row_complete(previous, report):
             skipped += 1
             continue
+        if not force and state_row_complete(expected, report):
+            try:
+                disk_qc = read_json(expected["qc_json"])
+            except Exception:
+                disk_qc = {}
+            if disk_qc.get("settings_hash") == out_row["settings_hash"]:
+                recovered[out_row["row_hash"]] = {
+                    "row_hash": out_row["row_hash"], "study_id": study_id, "output_id": output_id,
+                    "gwas_location": out_row["GWAS_location"], **expected, "updated_at": utc_now(),
+                }
+                skipped += 1
+                continue
         eligible.append(out_row)
+
+    if recovered and not errors:
+        with file_lock(args.state_file):
+            fresh_state = read_state(args.state_file)
+            fresh_state.update(recovered)
+            write_state(args.state_file, fresh_state.values())
 
     if errors:
         print("Manifest validation failed:\n  " + "\n  ".join(errors + [e for r in invalid for e in r["errors"]]), file=sys.stderr)

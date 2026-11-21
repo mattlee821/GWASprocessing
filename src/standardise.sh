@@ -48,6 +48,8 @@ Options:
   --profile NAME        Nextflow profile. Default: slurm inside an sbatch job, else $GWAS_PROFILE, else local
   --only-study STUDYID  Run one derived study ID, e.g. locke_2015_25673413.
   --row-limit N         Eligible manifest rows to run. Default: 1 for local, 0 (all) for slurm.
+  --max-jobs N          Concurrent SLURM jobs per run (params.slurm_max_jobs). Default: $GWAS_SLURM_MAX_JOBS or 50.
+  --queue NAME          SLURM partition/queue (params.slurm_queue). Default: $GWAS_SLURM_QUEUE or low_p.
   --force               Re-run rows even when complete outputs exist for the current settings.
   --dry-run             Build the run manifest without downloading or standardising.
   --report true|false   Write the per-GWAS HTML report (steps, QC flags, QQ plots). Default: true.
@@ -56,7 +58,7 @@ Options:
   -h, --help            Show this help.
 
 Environment (or .env): GWAS_WORK_ROOT, GWAS_REFERENCE_ROOT, GWAS_CONFIG_ROOT, GWAS_TEMP_ROOT, GWAS_LOG_ROOT,
-GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_REPORT, GWAS_ROW_LIMIT,
+GWAS_NEXTFLOW_WORK, GWAS_NEXTFLOW_LOG, GWAS_PROFILE, GWAS_REPORT, GWAS_ROW_LIMIT, GWAS_SLURM_MAX_JOBS, GWAS_SLURM_QUEUE,
 GWAS_ENV (tool environment from src/source.sh), GWAS_CONTAINER (apptainer or docker: run every step in the image),
 GWAS_CONTAINER_IMAGE, NEXTFLOW (path to the nextflow launcher).
 USAGE
@@ -84,6 +86,8 @@ TEMP_ROOT="${GWAS_TEMP_ROOT:-temp}"
 LOG_ROOT="${GWAS_LOG_ROOT:-temp/logs}"
 REPORT="${GWAS_REPORT:-true}"
 ROW_LIMIT="${GWAS_ROW_LIMIT:-}"
+SLURM_MAX_JOBS="${GWAS_SLURM_MAX_JOBS:-}"
+SLURM_QUEUE="${GWAS_SLURM_QUEUE:-}"
 NEXTFLOW_WORK="${GWAS_NEXTFLOW_WORK:-temp/nextflow_work}"
 NEXTFLOW_LOG="${GWAS_NEXTFLOW_LOG:-temp/.nextflow.log}"
 PROFILE=""
@@ -99,6 +103,8 @@ while [[ $# -gt 0 ]]; do
     --profile) PROFILE="$2"; shift 2 ;;
     --only-study) ONLY_STUDY="$2"; shift 2 ;;
     --row-limit) ROW_LIMIT="$2"; shift 2 ;;
+    --max-jobs|--slurm-max-jobs) SLURM_MAX_JOBS="$2"; shift 2 ;;
+    --queue|--slurm-queue) SLURM_QUEUE="$2"; shift 2 ;;
     --force) FORCE="true"; shift ;;
     --dry-run) DRY_RUN="true"; shift ;;
     --report) REPORT="$2"; shift 2 ;;
@@ -126,6 +132,10 @@ if [[ -z "${ROW_LIMIT}" ]]; then
 fi
 if ! [[ "${ROW_LIMIT}" =~ ^[0-9]+$ ]]; then
   echo "--row-limit must be a non-negative integer" >&2
+  exit 2
+fi
+if [[ -n "${SLURM_MAX_JOBS}" ]] && ! [[ "${SLURM_MAX_JOBS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "--max-jobs (GWAS_SLURM_MAX_JOBS) must be a positive integer" >&2
   exit 2
 fi
 
@@ -206,6 +216,8 @@ cmd=(
 )
 if [[ -n "${STUDY_YAML}" ]]; then cmd+=(--study_yaml "${STUDY_YAML}"); fi
 if [[ -n "${ONLY_STUDY}" ]]; then cmd+=(--only_study "${ONLY_STUDY}"); fi
+if [[ -n "${SLURM_MAX_JOBS}" ]]; then cmd+=(--slurm_max_jobs "${SLURM_MAX_JOBS}"); fi
+if [[ -n "${SLURM_QUEUE}" ]]; then cmd+=(--slurm_queue "${SLURM_QUEUE}"); fi
 
 cd "${TEMP_ROOT}"
 status=0

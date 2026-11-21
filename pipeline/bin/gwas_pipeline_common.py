@@ -630,7 +630,12 @@ def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
     return identity
 
 
-def settings_fingerprint(record: dict[str, Any], config: dict[str, Any], reference_root: str | Path) -> str:
+def settings_fingerprint(
+    record: dict[str, Any],
+    config: dict[str, Any],
+    reference_root: str | Path,
+    reference_files: dict[str, list[int]] | None = None,
+) -> str:
     """Hash of everything that determines a row's outputs; a mismatch means the outputs are stale."""
     row_payload = {col: str(record.get(col, "") or "").strip() for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}
     row_payload["GWAS_location"] = strip_url_secrets(row_payload["GWAS_location"])
@@ -641,7 +646,7 @@ def settings_fingerprint(record: dict[str, Any], config: dict[str, Any], referen
         "schema": OUTPUT_SCHEMA_VERSION,
         "row": row_payload,
         "config": {key: value for key, value in config.items() if key != "_config_path"},
-        "references": reference_identity(reference_root),
+        "references": reference_identity(reference_root) if reference_files is None else reference_files,
     }
     return short_hash(json.dumps(payload, sort_keys=True, default=str), 16)
 

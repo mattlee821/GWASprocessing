@@ -127,7 +127,7 @@ bash src/standardise.sh --manifest manifests/test.tsv                 # 1 row at
 bash src/standardise.sh --only-study locke_2015_25673413              # 1 study
 bash src/standardise.sh --force                                       # rerun rows that are complete
 bash src/standardise.sh --report false                                # no HTML report per GWAS
-sbatch src/standardise.sh --manifest manifests/test.tsv               # SLURM: every row, 1 job each
+sbatch src/standardise.sh --manifest manifests/test.tsv               # SLURM: every row, 1 job each (50 concurrent; --max-jobs N or GWAS_SLURM_MAX_JOBS in .env)
 ```
 
 #### 4. Check what has been processed

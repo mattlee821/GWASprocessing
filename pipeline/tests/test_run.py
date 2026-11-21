@@ -159,6 +159,11 @@ class RunTest(unittest.TestCase):
             self.assertEqual((w.value("--work_root"), w.value("--report"), w.value("--row_limit")), (str(work), "false", "3"))
             proc = w.run("--row-limit", "5", env=w.env(GWAS_ROW_LIMIT="4"))
             self.assertEqual(w.value("--row_limit"), "5", "a command-line option wins over the environment")
+            proc = w.run("--max-jobs", "200", "--queue", "high_p",
+                         env=w.env(GWAS_SLURM_MAX_JOBS="80", GWAS_SLURM_QUEUE="low_p"))
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertEqual((w.value("--slurm_max_jobs"), w.value("--slurm_queue")), ("200", "high_p"))
+            self.assertEqual(w.run("--max-jobs", "0").returncode, 2)
 
         with self.subTest("the values in .env.example are never read"):
             w = wrapper()  # .env.example only: its /WHERE/... placeholders must not reach the run
