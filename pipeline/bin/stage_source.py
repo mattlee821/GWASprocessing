@@ -17,6 +17,7 @@ import re
 import shutil
 from pathlib import Path
 
+from download_archive import download_archive_member
 from download_gwas_catalog import download_gwas_catalog, md5, verify_gzip
 from download_opengwas import download_opengwas
 from download_synapse import download_synapse
@@ -31,6 +32,7 @@ from gwas_pipeline_common import (
     read_json,
     resolve_row_config,
     sanitize_filename,
+    split_archive_url,
     strip_url_secrets,
     write_json,
 )
@@ -197,7 +199,17 @@ def main() -> None:
             raw_path, tar_info = combine_tar_table(raw_path, raw_dir, row["output_id"])
             metadata.update(tar_info)
     elif source_type == "direct_url":
-        raw_path = checked_download(lambda: download_url(location, raw_dir), metadata)
+        _, archive_member = split_archive_url(location)
+        if archive_member:
+            arch_info: dict = {}
+
+            def fetch_member() -> Path:
+                arch_info.update(download_archive_member(location, raw_dir))
+                return Path(arch_info["raw_path"])
+            raw_path = checked_download(fetch_member, metadata)
+            metadata.update(arch_info)
+        else:
+            raw_path = checked_download(lambda: download_url(location, raw_dir), metadata)
         if raw_path.name.endswith(".tar"):
             raw_path, tar_info = combine_tar_table(raw_path, raw_dir, row["output_id"])
             metadata.update(tar_info)

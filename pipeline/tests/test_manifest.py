@@ -607,6 +607,22 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(c.summary()["rows_skipped_complete"], 1)
             self.assertEqual(c.summary()["rows_to_run"], 0)
 
+        with self.subTest("archive-member URLs (<archive.zip>#<member>) derive distinct output IDs and member filenames"):
+            m1 = "https://jh-pwas.s3.amazonaws.com/results/EA.zip#EA/SeqId_2190_55.PHENO1.glm.linear"
+            m2 = "https://jh-pwas.s3.amazonaws.com/results/EA.zip#EA/SeqId_2192_63.PHENO1.glm.linear"
+            self.assertEqual(common.split_archive_url(m1),
+                             ("https://jh-pwas.s3.amazonaws.com/results/EA.zip", "EA/SeqId_2190_55.PHENO1.glm.linear"))
+            self.assertEqual(common.split_archive_url("https://www.synapse.org/#!Synapse:syn51365303"),
+                             ("https://www.synapse.org/#!Synapse:syn51365303", None))
+            self.assertEqual(common.guess_filename_from_url(m1), "SeqId_2190_55.PHENO1.glm.linear")
+            c = case()
+            c.manifest(f"{m1}\tFXI\tEUR\tZhang\t2022\t35501419\n{m2}\tCCL27\tEUR\tZhang\t2022\t35501419\n")
+            c.prepare("--row-limit", "0")
+            self.assertEqual(c.summary()["rows_to_run"], 2)
+            ids = [r["output_id"] for r in c.rows()]
+            self.assertNotEqual(ids[0], ids[1])
+            self.assertTrue(all("SeqId_" in x for x in ids), ids)
+
 
 if __name__ == "__main__":
     unittest.main()

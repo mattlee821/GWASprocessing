@@ -424,6 +424,40 @@ class Step01StageTest(unittest.TestCase):
                 "https://download.decode.is/s3/download?token=abc&file=10000_28_CRYBB2_CRBB2.txt.gz"),
                 "10000_28_CRYBB2_CRBB2.txt.gz")
 
+        with self.subTest("Archive-member URLs (<zip_url>#<member>) cache the archive once and extract each member"):
+            import zipfile
+            import download_archive
+            served_zip = self.tmp / "served_zip"
+            served_zip.mkdir()
+            zip_file = served_zip / "EA.zip"
+            payload_a = (EXAMPLES / "tables/generic.tsv").read_bytes()
+            payload_b = b"SNP\tP\nrs10\t0.01\n"
+            with zipfile.ZipFile(zip_file, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr("EA/SeqId_2190_55.PHENO1.glm.linear", payload_a)
+                zf.writestr("EA/SeqId_2192_63.PHENO1.glm.linear", payload_b)
+            study_raw = self.tmp / "zhang_study" / "raw"
+            with LocalHttpServer(served_zip) as server:
+                listed = download_archive.list_zip_members(f"{server.url}/EA.zip")
+                self.assertEqual(listed, ["EA/SeqId_2190_55.PHENO1.glm.linear", "EA/SeqId_2192_63.PHENO1.glm.linear"])
+                r_a = self.row(f"{server.url}/EA.zip#EA/SeqId_2190_55.PHENO1.glm.linear", "direct_url",
+                               name="zhang_a", raw_dir=str(study_raw / "P03951_2190-55"))
+                r_b = self.row(f"{server.url}/EA.zip#EA/SeqId_2192_63.PHENO1.glm.linear", "direct_url",
+                               name="zhang_b", raw_dir=str(study_raw / "Q9Y4X3_2192-63"))
+                r_miss = self.row(f"{server.url}/EA.zip#EA/SeqId_9999_99.PHENO1.glm.linear", "direct_url",
+                                  name="zhang_miss", raw_dir=str(study_raw / "MISS_9999-99"))
+                proc_a, rec_a = self.stage(r_a)
+                # Remove server file to prove second row reuses the shared cached archive without re-downloading
+                zip_file.unlink()
+                proc_b, rec_b = self.stage(r_b)
+                proc_m, _ = self.stage(r_miss)
+            self.assertEqual(proc_a.returncode, 0, proc_a.stderr)
+            self.assertEqual(proc_b.returncode, 0, proc_b.stderr)
+            self.assertEqual(Path(rec_a["raw_path"]).read_bytes(), payload_a)
+            self.assertEqual(Path(rec_b["raw_path"]).read_bytes(), payload_b)
+            self.assertEqual(rec_a["metadata"]["archive_member"], "EA/SeqId_2190_55.PHENO1.glm.linear")
+            self.assertEqual(len(list((study_raw / "_archives").glob("*_EA.zip"))), 1)
+            self.assertEqual(proc_m.returncode, common.EXIT_DATA)
+
         with self.subTest("URL downloads are checked by gzip integrity"):
             served = self.tmp / "served_gz"
             served.mkdir()

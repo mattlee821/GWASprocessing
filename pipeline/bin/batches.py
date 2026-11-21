@@ -249,6 +249,13 @@ def cmd_clean_raw(args: argparse.Namespace) -> None:
             cleaned += 1
 
     if args.clean_temp:
+        seen_archives: set[Path] = set()
+        for r in rows:
+            arch_dir = _row_paths(r, work_root)["raw_dir"].parent / "_archives"
+            if arch_dir not in seen_archives and arch_dir.is_dir():
+                seen_archives.add(arch_dir)
+                freed += _dir_bytes(arch_dir)
+                shutil.rmtree(arch_dir, ignore_errors=True)
         for env_key in ("GWAS_NEXTFLOW_WORK", "GWAS_TMPDIR"):
             val = os.environ.get(env_key, "").strip()
             if val and Path(val).is_dir():

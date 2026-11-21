@@ -2,35 +2,34 @@
 # Build the GWASprocessing manifest for the Zhang et al. 2022 (PMID 35501419) ARIC SomaScan cis-pGWAS.
 #
 # Usage:
-#   Rscript manifests/make_zhang_manifest.R --files DIR_OR_LIST --out manifests/zhang_EUR.tsv
-#       [--ancestry EUR] [--study-id ID] [--location-dir DIR] [--usefuldata PATH] [--st01 seqid.txt]
-#       [--yaml manifests/zhang_2022_35501419.yaml] [--limit N]
+#   Rscript manifests/make_zhang_manifest.R [--ancestry EUR|AFR] [--archive-url URL | --files DIR_OR_LIST]
+#       --out manifests/zhang_EUR.tsv [--study-id ID] [--location-dir DIR] [--usefuldata PATH]
+#       [--st01 seqid.txt] [--yaml manifests/zhang_2022_35501419.yaml] [--limit N]
 #
-#   --files         a folder of the per-protein files (SeqId_<a>_<b>.PHENO1.glm.linear), or a text file listing their names
 #   --ancestry      manifest ancestry: EUR (or EA / european, default) or AFR (or AA / african)
+#   --archive-url   remote .zip archive URL holding the per-protein .glm.linear files (default when --files is omitted:
+#                   https://jh-pwas.s3.amazonaws.com/results/EA.zip for EUR, or .../AA.zip for AFR; each row gets
+#                   GWAS_location = <archive-url>#<member> with source_type = direct_url so no pre-download is needed)
+#   --files         optional local folder of SeqId_<a>_<b>.PHENO1.glm.linear files, or a text file listing names/URLs
 #   --study-id      output study folder name (default zhang_2022_35501419_<POP>, e.g. zhang_2022_35501419_EUR or zhang_2022_35501419_AFR)
-#   --location-dir  folder written into GWAS_location (default: --files when it is a folder)
+#   --location-dir  folder written into GWAS_location for local plain filename lists (default: --files when it is a folder)
 #   --usefuldata    path of the usefuldata package (default: the installed package; install it with remotes::install_github("mattlee821/usefuldata"))
-#   --st01          the study's seqid.txt (seqid_in_sample, uniprot_id, entrezgenesymbol, ...), to report where its UniProt differs
+#   --st01          the study's seqid.txt (seqid_in_sample, uniprot_id, entrezgenesymbol, ...), or URL; fetched automatically
+#                   from https://jh-pwas.s3.amazonaws.com/results/seqid.txt when using the default archive URL
 #   --limit         the first N files in SeqId order (a subset to test)
 #
-# Each file is identified by its SeqId (2 numeric parts, 10000_28), which is how deCODE names the files. The name of the
-# standardised output is UNIPROT_SEQID: "_" separates the 2 values and "-" separates the parts of a value, so the
-# UniProt accession(s) from usefuldata::somalogic_seqid_uniprot_current (the most recent SomaLogic annotation, retired
-# accessions replaced by current ones; several accessions joined with "-") and the SeqId written with "-" (10000-28),
-# for example P43320_10000-28 and P01011-P07288_4153-11. A file whose SeqId has no current accession is left out of the manifest and listed in <out>.not_written.tsv.
-# Also written: <out>.names.tsv (every file with its name and the mapping behind it) and <out>.provenance.txt.
+# Each file is identified by its SeqId (2 numeric parts, 10000_28). The name of the standardised output is UNIPROT_SEQID:
+# "_" separates the 2 values and "-" separates the parts of a value, using usefuldata::somalogic_seqid_uniprot_current
+# (for example P43320_10000-28 and P01011-P07288_4153-11). A file whose SeqId has no current accession is left out of the
+# manifest and listed in <out>.not_written.tsv. Also written: <out>.names.tsv and <out>.provenance.txt.
 
 args <- commandArgs(trailingOnly = TRUE)
 option <- function(name, default = NA_character_) {
   i <- match(paste0("--", name), args)
   if (is.na(i)) default else args[i + 1L]
 }
-files_arg <- option("files")
 out <- option("out")
-if (is.na(files_arg) || is.na(out)) stop("Usage: --files DIR_OR_LIST --out MANIFEST.tsv (see the header of this script)", call. = FALSE)
-location_dir <- option("location-dir", if (dir.exists(files_arg)) normalizePath(files_arg) else NA_character_)
-if (is.na(location_dir)) stop("--location-dir is needed when --files is a list", call. = FALSE)
+if (is.na(out)) stop("Usage: [--ancestry EUR|AFR] [--archive-url URL | --files DIR_OR_LIST] --out MANIFEST.tsv (see script header)", call. = FALSE)
 yaml <- option("yaml", "manifests/zhang_2022_35501419.yaml")
 ancestry_arg <- option("ancestry", "EUR")
 pop_code <- switch(tolower(ancestry_arg),
@@ -38,6 +37,9 @@ pop_code <- switch(tolower(ancestry_arg),
                    "afr" = "AFR", "aa" = "AFR", "african" = "AFR", "african-american" = "AFR",
                    stop("--ancestry for Zhang 2022 must be EUR (EA) or AFR (AA), got: ", ancestry_arg, call. = FALSE))
 study_id <- option("study-id", paste0("zhang_2022_35501419_", pop_code))
+files_arg <- option("files")
+default_archive <- if (pop_code == "EUR") "https://jh-pwas.s3.amazonaws.com/results/EA.zip" else "https://jh-pwas.s3.amazonaws.com/results/AA.zip"
+archive_url <- option("archive-url", if (is.na(files_arg)) default_archive else NA_character_)
 st01_path <- option("st01")
 limit <- as.integer(option("limit", NA_character_))
 
@@ -61,13 +63,51 @@ if (is.na(package_path) && requireNamespace("usefuldata", quietly = TRUE)) {
 mapping$key <- gsub("-", "_", mapping$SeqId)
 
 # the files ====
-file_names <- if (dir.exists(files_arg)) list.files(files_arg, pattern = "\\.glm\\.linear$") else
-  basename(trimws(readLines(files_arg)[nzchar(trimws(readLines(files_arg)))]))
-file_names <- file_names[grepl("\\.glm\\.linear$", file_names)]
+urls <- NULL
+if (!is.na(archive_url)) {
+  if (file.exists(".env")) readRenviron(".env")
+  env_dir <- Sys.getenv("GWAS_ENV", "")
+  py <- if (nzchar(env_dir) && file.exists(file.path(env_dir, "bin", "python3"))) file.path(env_dir, "bin", "python3") else
+    if (file.exists(".tools/env/bin/python3")) ".tools/env/bin/python3" else Sys.which("python3")
+  tmp_members <- tempfile(fileext = ".txt")
+  on.exit(unlink(tmp_members), add = TRUE)
+  status <- system2(py, c("pipeline/bin/download_archive.py", "--list-members", archive_url, "--out", tmp_members))
+  if (status != 0L) stop("Failed to list archive members from ", archive_url, call. = FALSE)
+  members <- trimws(readLines(tmp_members))
+  members <- members[nzchar(members)]
+  urls <- paste0(archive_url, "#", members)
+  file_names <- basename(members)
+  if (is.na(st01_path) && grepl("^https?://jh-pwas\\.s3\\.amazonaws\\.com/results/", archive_url)) {
+    tmp_seqid <- tempfile(fileext = ".txt")
+    on.exit(unlink(tmp_seqid), add = TRUE)
+    ok_dl <- tryCatch({ utils::download.file("https://jh-pwas.s3.amazonaws.com/results/seqid.txt", tmp_seqid, quiet = TRUE); TRUE },
+                      error = function(e) FALSE)
+    if (ok_dl && file.exists(tmp_seqid) && file.info(tmp_seqid)$size > 0) st01_path <- tmp_seqid
+  }
+} else if (dir.exists(files_arg)) {
+  file_names <- list.files(files_arg, pattern = "\\.glm\\.linear$")
+} else {
+  raw_lines <- trimws(readLines(files_arg))
+  raw_lines <- raw_lines[nzchar(raw_lines) & !startsWith(raw_lines, "#")]
+  if (length(raw_lines) > 0L && all(grepl("^https?://", raw_lines, ignore.case = TRUE))) {
+    urls <- raw_lines
+    file_names <- basename(sub("^.*#", "", raw_lines))
+  } else {
+    file_names <- basename(raw_lines)
+  }
+}
+
+is_glm <- grepl("\\.glm\\.linear$", file_names)
+file_names <- file_names[is_glm]
+if (!is.null(urls)) urls <- urls[is_glm]
+location_dir <- option("location-dir", if (!is.na(files_arg) && dir.exists(files_arg)) normalizePath(files_arg) else NA_character_)
+if (is.null(urls) && is.na(location_dir)) stop("--location-dir is needed when --files is a plain filename list", call. = FALSE)
+
 parsed <- regmatches(file_names, regexec("^SeqId_([0-9]+_[0-9]+)\\.PHENO1\\.glm\\.linear$", file_names))
 has_seqid <- lengths(parsed) == 2L
 not_written <- data.frame(file = file_names[!has_seqid], reason = rep("no SeqId at the start of the file name", sum(!has_seqid)))
 files <- data.frame(file = file_names[has_seqid], key = vapply(parsed[has_seqid], `[`, character(1), 2L), stringsAsFactors = FALSE)
+if (!is.null(urls)) files$url <- urls[has_seqid]
 files <- files[order(as.integer(sub("_.*", "", files$key)), as.integer(sub(".*_", "", files$key))), , drop = FALSE]
 if (!is.na(limit)) files <- head(files, limit)
 if (anyDuplicated(files$key)) stop("Two files share a SeqId: ", paste(files$key[duplicated(files$key)], collapse = ", "), call. = FALSE)
@@ -85,11 +125,12 @@ if (anyDuplicated(names_table$output_name[ok])) stop("Two files get the same out
 
 # the manifest ====
 manifest <- data.frame(
-  GWAS_location = file.path(location_dir, names_table$file[ok]),
+  GWAS_location = if ("url" %in% names(names_table)) names_table$url[ok] else file.path(location_dir, names_table$file[ok]),
   phenotype = paste0(ifelse(is.na(names_table$TargetFullName[ok]), names_table$Target[ok], names_table$TargetFullName[ok]),
                      " plasma protein level, cis-pGWAS (SomaScan aptamer ", names_table$SeqId[ok], ")"),
   ancestry = pop_code, sex = "combined", author = "Zhang", year = "2022", PMID = "35501419",
-  source_type = "local", input_build = "hg38", population = pop_code, delimiter = "tab", format = "table",
+  source_type = if ("url" %in% names(names_table)) "direct_url" else "local",
+  input_build = "hg38", population = pop_code, delimiter = "tab", format = "table",
   study_yaml = yaml, output_name = names_table$output_name[ok], study_id = study_id,
   stringsAsFactors = FALSE
 )

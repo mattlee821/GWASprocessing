@@ -257,6 +257,37 @@ def strip_url_secrets(location: str) -> str:
     return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(kept, doseq=True)))
 
 
+ARCHIVE_URL_SUFFIXES = (".zip", ".tar", ".tar.gz", ".tgz")
+
+
+def _raw_url_filename(url: str, fallback: str = "") -> str:
+    parsed = urllib.parse.urlparse(url)
+    query = urllib.parse.parse_qs(parsed.query)
+    for key in ["filename", "file", "download"]:
+        if query.get(key):
+            candidate = Path(urllib.parse.unquote(query[key][0])).name
+            if candidate:
+                return candidate
+    name = Path(parsed.path).name
+    if name:
+        return urllib.parse.unquote(name)
+    return fallback
+
+
+def split_archive_url(location: str) -> tuple[str, str | None]:
+    """Split '<archive_url>#<member>' when an HTTP/HTTPS/FTP URL points to a .zip/.tar archive with a member fragment."""
+    text = str(location if location is not None else "").strip()
+    if "#" not in text or not text.lower().startswith(("http://", "https://", "ftp://")):
+        return text, None
+    base, fragment = text.split("#", 1)
+    member = urllib.parse.unquote(fragment).strip().lstrip("/")
+    if not member or member.startswith("!"):
+        return text, None
+    if not _raw_url_filename(base, "").lower().endswith(ARCHIVE_URL_SUFFIXES):
+        return text, None
+    return base, member
+
+
 def extract_accession_or_basename(location: str, source_type: str) -> str:
     if source_type == "gwas_catalog":
         match = re.search(r"GCST\d+", location, flags=re.I)
@@ -265,8 +296,12 @@ def extract_accession_or_basename(location: str, source_type: str) -> str:
         return opengwas_dataset_id(location) or "opengwas"
     if source_type == "synapse":
         return synapse_entity_id(location) or "synapse"
-    parsed = urllib.parse.urlparse(location)
-    name = guess_filename_from_url(location, "") if parsed.query else (Path(parsed.path).name if parsed.path else Path(location).name)
+    _, member = split_archive_url(location)
+    if member:
+        name = Path(member).name
+    else:
+        parsed = urllib.parse.urlparse(location)
+        name = guess_filename_from_url(location, "") if parsed.query else (Path(parsed.path).name if parsed.path else Path(location).name)
     if not name:
         name = source_type
     for suffix in [".tsv.gz", ".txt.gz", ".tbl.gz", ".csv.gz", ".vcf.gz", ".tsv", ".txt", ".tbl", ".csv", ".vcf", ".gz", ".zip", ".tar"]:
@@ -601,17 +636,12 @@ def url_links(url: str) -> list[str]:
 
 
 def guess_filename_from_url(url: str, fallback: str = "downloaded_gwas") -> str:
-    parsed = urllib.parse.urlparse(url)
-    query = urllib.parse.parse_qs(parsed.query)
-    for key in ["filename", "file", "download"]:
-        if query.get(key):
-            candidate = Path(urllib.parse.unquote(query[key][0])).name
-            if candidate:
-                return candidate
-    name = Path(parsed.path).name
-    if name:
-        return urllib.parse.unquote(name)
-    return fallback
+    _, member = split_archive_url(url)
+    if member:
+        member_name = Path(member).name
+        if member_name:
+            return member_name
+    return _raw_url_filename(url, fallback)
 
 
 def download_url(url: str, out_dir: str | Path, filename: str | None = None, retries: int = 3, timeout: int = 600,
