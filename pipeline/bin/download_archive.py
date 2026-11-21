@@ -12,7 +12,9 @@ CLI helper for manifest builders:
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
+import socket
 import struct
 import tarfile
 import tempfile
@@ -28,6 +30,7 @@ from gwas_pipeline_common import (
     ensure_dir,
     file_lock,
     guess_filename_from_url,
+    safe_path_component,
     sanitize_filename,
     short_hash,
     split_archive_url,
@@ -114,18 +117,20 @@ def download_archive_member(location: str, out_dir: str | Path, cache_dir: str |
     cached_name = f"{short_hash(clean_archive_url, 8)}_{archive_base}"
     archives_dir = ensure_dir(cache_dir if cache_dir is not None else out_dir.parent / "_archives")
     archive_path = archives_dir / cached_name
-    lock_path = archives_dir / f"{cached_name}.lock"
 
     lower_name = archive_base.lower()
     is_zip = lower_name.endswith(".zip")
 
-    with file_lock(lock_path):
-        if not archive_path.exists() or archive_path.stat().st_size == 0:
-            download_url(archive_url, archives_dir, filename=cached_name)
-        valid = zipfile.is_zipfile(archive_path) if is_zip else tarfile.is_tarfile(archive_path)
-        if not valid:
-            archive_path.unlink(missing_ok=True)
-            raise IOError(f"Downloaded file from {clean_archive_url} is not a valid archive")
+    if not (archive_path.exists() and archive_path.stat().st_size > 0):
+        with file_lock(archive_path):
+            if not (archive_path.exists() and archive_path.stat().st_size > 0):
+                staging_name = f".staging_{safe_path_component(socket.gethostname())}_{os.getpid()}_{cached_name}"
+                staging_path = download_url(archive_url, archives_dir, filename=staging_name)
+                valid = zipfile.is_zipfile(staging_path) if is_zip else tarfile.is_tarfile(staging_path)
+                if not valid:
+                    staging_path.unlink(missing_ok=True)
+                    raise IOError(f"Downloaded file from {clean_archive_url} is not a valid archive")
+                staging_path.replace(archive_path)
 
     dest = out_dir / sanitize_filename(Path(member).name)
     if not dest.exists() or dest.stat().st_size == 0:

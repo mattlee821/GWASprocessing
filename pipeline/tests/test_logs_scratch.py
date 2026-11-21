@@ -75,6 +75,18 @@ class FileLockTest(unittest.TestCase):
             for proc in procs:
                 self.assertEqual(proc.wait(), 0)
             self.assertEqual(int(counter.read_text()), 160)
+            self.assertFalse(Path(str(counter) + ".lockdir").exists())
+
+    def test_stale_lockdir_is_recovered(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "state.tsv"
+            lock_dir = Path(str(target) + ".lockdir")
+            lock_dir.mkdir()
+            old = os.path.getmtime(lock_dir) - 600.0
+            os.utime(lock_dir, (old, old))
+            with common.file_lock(target, stale_after=1.0, heartbeat_interval=0.0):
+                self.assertTrue(lock_dir.is_dir())
+            self.assertFalse(lock_dir.exists())
 
 
 if __name__ == "__main__":

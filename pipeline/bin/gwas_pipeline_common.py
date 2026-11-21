@@ -13,11 +13,14 @@ import io
 import json
 import math
 import os
+import random
 import re
 import shutil
+import socket
 import ssl
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -421,17 +424,61 @@ def atomic_write_text(path: str | Path, text: str) -> None:
 
 
 @contextlib.contextmanager
-def file_lock(path: str | Path):
-    """Hold an exclusive lock on `<path>.lock` while a file is read, changed and written back, so runs that overlap
-    (several studies submitted together) do not overwrite each other's updates."""
-    lock_path = Path(str(path) + ".lock")
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "w") as handle:
-        fcntl.flock(handle, fcntl.LOCK_EX)
+def file_lock(path: str | Path, stale_after: float = 300.0, heartbeat_interval: float = 15.0):
+    """Hold a cross-node NFS-safe exclusive lock on `<path>.lockdir` while a shared file or cache is updated.
+
+    `fcntl.flock` is kernel-local under Linux's default NFS mount (`local_lock=flock`), allowing workers on different
+    SLURM compute nodes to enter at once. `os.mkdir` is an atomic server-side metadata operation across NFSv3/NFSv4 and
+    local filesystems; a daemon heartbeat refreshes `mtime` during long downloads while allowing stale-lock recovery.
+    """
+    lock_dir = Path(str(path) + ".lockdir")
+    lock_dir.parent.mkdir(parents=True, exist_ok=True)
+    backoff = 0.005
+    while True:
         try:
-            yield
-        finally:
-            fcntl.flock(handle, fcntl.LOCK_UN)
+            os.mkdir(lock_dir)
+            break
+        except FileExistsError:
+            try:
+                age = time.time() - lock_dir.stat().st_mtime
+            except OSError:
+                age = 0.0
+            if stale_after > 0 and age > stale_after:
+                stale_tmp = lock_dir.with_name(
+                    f"{lock_dir.name}.stale.{safe_path_component(socket.gethostname())}.{os.getpid()}.{time.time_ns()}"
+                )
+                try:
+                    os.replace(lock_dir, stale_tmp)
+                    shutil.rmtree(stale_tmp, ignore_errors=True)
+                    continue
+                except OSError:
+                    pass
+            time.sleep(backoff + random.uniform(0.0, backoff * 0.5))
+            backoff = min(0.25, backoff * 1.5)
+
+    stop_event = threading.Event()
+
+    def _heartbeat() -> None:
+        while not stop_event.wait(heartbeat_interval):
+            try:
+                os.utime(lock_dir, None)
+            except OSError:
+                return
+
+    hb: threading.Thread | None = None
+    if heartbeat_interval > 0:
+        hb = threading.Thread(target=_heartbeat, name="gwas-file-lock-hb", daemon=True)
+        hb.start()
+    try:
+        yield
+    finally:
+        stop_event.set()
+        if hb is not None:
+            hb.join(timeout=1.0)
+        try:
+            os.rmdir(lock_dir)
+        except OSError:
+            shutil.rmtree(lock_dir, ignore_errors=True)
 
 
 def write_state(path: str | Path, rows: Iterable[dict[str, str]]) -> None:
@@ -651,7 +698,7 @@ def download_url(url: str, out_dir: str | Path, filename: str | None = None, ret
     out = out_dir / sanitize_filename(filename)
     if out.exists() and out.stat().st_size > 0:
         return out
-    part = out.with_name(out.name + ".part")
+    part = out.with_name(f".{out.name}.{safe_path_component(socket.gethostname())}.{os.getpid()}.{threading.get_ident()}.part")
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
         part.unlink(missing_ok=True)

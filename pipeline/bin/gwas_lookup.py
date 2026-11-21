@@ -121,17 +121,18 @@ def _build(path: Path, key: str, delimiter: str | None, out: Path) -> dict[str, 
 def ensure_index(path: Path, key: str, delimiter: str | None = None) -> Path | None:
     """The index directory of `path` keyed on `key`, built (once, under a lock) when missing or out of date; None when
     the file has no column `key`."""
+    from gwas_pipeline_common import file_lock, safe_path_component
+    import socket
+
     _require_pyarrow()
     out = index_dir(path)
     if _current(out, path, key):
         return out
-    lock = open(path.with_name(path.name + ".index.lock"), "w")
-    try:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with file_lock(path.with_name(path.name + ".index")):
         if _current(out, path, key):  # another GWAS built it while this one waited
             return out
         print(f"Building the lookup index of {path} (first use; read once, start to finish)", flush=True)
-        tmp = out.with_name(out.name + f".tmp{os.getpid()}")
+        tmp = out.with_name(f"{out.name}.tmp.{safe_path_component(socket.gethostname())}.{os.getpid()}")
         shutil.rmtree(tmp, ignore_errors=True)
         try:
             meta = _build(path, key, delimiter, tmp)
@@ -142,9 +143,6 @@ def ensure_index(path: Path, key: str, delimiter: str | None = None) -> Path | N
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
         return out
-    finally:
-        fcntl.flock(lock, fcntl.LOCK_UN)
-        lock.close()
 
 
 class Index:
