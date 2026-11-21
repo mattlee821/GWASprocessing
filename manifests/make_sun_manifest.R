@@ -3,14 +3,15 @@
 #
 # Usage:
 #   Rscript manifests/make_sun_manifest.R (--synapse-folder SYN_ID | --files DIR_OR_LIST) --out manifests/sun_combined.tsv --map-dir DIR
-#       [--location-dir DIR] [--yaml manifests/sun_2023_37794186.yaml] [--ancestry combined] [--limit N]
+#       [--location-dir DIR] [--yaml manifests/sun_2023_37794186.yaml] [--ancestry combined] [--study-id ID] [--limit N]
 #
 #   --synapse-folder  Synapse folder ID holding the per-protein .tar files (uses SYNAPSE_TOKEN from .env or environment)
 #   --files           a folder of the per-protein tar files (<Assay>_<UniProt>_<OlinkID>_v1_<Panel>.tar), a 2-column TSV of
 #                     synapse_id and file name (from download_synapse.py --list-children), or a text file listing file names
 #   --map-dir         folder with olink_protein_map_1.5k_v1.tsv and olink_protein_map_3k_v1.tsv (Synapse syn51396703, Protein annotation)
 #   --location-dir    folder written into GWAS_location for local file lists (default: --files when it is a folder)
-#   --ancestry        manifest ancestry (default combined = the multi-ancestry GWAS; european, african, ... for the others)
+#   --ancestry        manifest ancestry (default combined = ALL; european = EUR, african = AFR, ...)
+#   --study-id        output study folder name (default sun_2023_37794186_<POP>, e.g. sun_2023_37794186_ALL or sun_2023_37794186_EUR)
 #   --limit           the first N files in OlinkID order
 #
 # The name of the standardised output is UNIPROT_OLINKID, for example P16442_OID30675. "_" separates the 2 values and "-"
@@ -96,13 +97,15 @@ not_written <- rbind(not_written, data.frame(file = names_table$file[!is.na(reas
 ok <- is.na(reason)
 if (anyDuplicated(names_table$output_name[ok])) stop("Two files get the same output name", call. = FALSE)
 
+pop_code <- toupper(if (tolower(ancestry) %in% c("combined", "all")) "ALL" else substr(ancestry, 1, 3))
+study_id <- option("study-id", paste0("sun_2023_37794186_", pop_code))
 manifest <- data.frame(
   GWAS_location = if ("synapse_id" %in% names(names_table)) names_table$synapse_id[ok] else file.path(location_dir, names_table$file[ok]),
   phenotype = paste0(names_table$olink_target_fullname[ok], " plasma protein level (Olink Explore, ", sub("_", " ", names_table$Panel[ok]), " panel, ", names_table$OlinkID[ok], ")"),
   ancestry = ancestry, sex = "combined", author = "Sun", year = "2023", PMID = "37794186",
   source_type = if ("synapse_id" %in% names(names_table)) "synapse" else "local",
-  input_build = "hg38", population = toupper(if (ancestry == "combined") "ALL" else substr(ancestry, 1, 3)), delimiter = "space", format = "table",
-  study_yaml = yaml, output_name = names_table$output_name[ok], stringsAsFactors = FALSE
+  input_build = "hg38", population = pop_code, delimiter = "space", format = "table",
+  study_yaml = yaml, output_name = names_table$output_name[ok], study_id = study_id, stringsAsFactors = FALSE
 )
 write.table(manifest, out, sep = "\t", quote = FALSE, row.names = FALSE)
 write.table(names_table, paste0(out, ".names.tsv"), sep = "\t", quote = FALSE, row.names = FALSE, na = "")

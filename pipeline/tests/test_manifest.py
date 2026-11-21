@@ -357,6 +357,22 @@ class ManifestTest(unittest.TestCase):
             self.assertEqual(Path(row["standardise_dir"]), c.dir / "work" / "locke_2015_25673413" / "standardise" / "GWAScatalog_GCST002783")
             self.assertEqual(row["output_prefix"], str(Path(row["standardise_dir"]) / "standardised"))
 
+        with self.subTest("an optional study_id column overrides the study folder name without altering default hashes"):
+            c = case()
+            hdr_sid = HEADER.rstrip("\n") + "\toutput_name\tstudy_id\n"
+            c.manifest(f"{RAW}\tIL6\tALL\tSun\t2023\t37794186\tP05231_OID20101\tsun_2023_37794186_ALL\n"
+                       f"{RAW}\tIL6\tEUR\tSun\t2023\t37794186\tP05231_OID20101\tsun_2023_37794186_EUR\n"
+                       f"{RAW}\tIL6\tEUR\tSun\t2023\t37794186\tP05231_OID20101\tbad/study\n", hdr_sid)
+            proc = c.prepare(check=False)
+            self.assert_rejected(c, proc, run=2)
+            self.assertIn("study_id 'bad/study'", proc.stderr)
+            jsons = c.row_jsons()
+            self.assertEqual([r["study_id"] for r in jsons], ["sun_2023_37794186_ALL", "sun_2023_37794186_EUR"])
+            self.assertTrue(jsons[0]["standardise_dir"].endswith("/sun_2023_37794186_ALL/standardise/P05231_OID20101"))
+            self.assertTrue(jsons[1]["standardise_dir"].endswith("/sun_2023_37794186_EUR/standardise/P05231_OID20101"))
+            self.assertNotEqual(jsons[0]["row_hash"], jsons[1]["row_hash"])
+            self.assertNotEqual(jsons[0]["settings_hash"], jsons[1]["settings_hash"])
+
         with self.subTest("relative local paths resolve against the manifest directory"):
             c = case()
             (c.config_root / "data").mkdir()

@@ -160,7 +160,7 @@ def file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
-def study_id_from_row(row: dict[str, str]) -> str:
+def default_study_id(row: dict[str, Any]) -> str:
     return "_".join(
         [
             sanitize(row.get("author")),
@@ -168,6 +168,11 @@ def study_id_from_row(row: dict[str, str]) -> str:
             sanitize(row.get("PMID")),
         ]
     )
+
+
+def study_id_from_row(row: dict[str, Any]) -> str:
+    explicit = str(row.get("study_id", "") or "").strip()
+    return explicit if explicit else default_study_id(row)
 
 
 def opengwas_dataset_id(location: str) -> str | None:
@@ -283,6 +288,9 @@ def output_id_from_row(row: dict[str, str], source_type: str) -> str:
 def row_hash(row: dict[str, str]) -> str:
     payload = {col: str(row.get(col, "")).strip() for col in MANIFEST_COLUMNS}
     payload.update({col: str(row.get(col, "")).strip() for col in MANIFEST_OPTIONAL_COLUMNS if str(row.get(col, "")).strip()})
+    explicit_study = str(row.get("study_id", "") or "").strip()
+    if explicit_study and explicit_study != default_study_id(row):
+        payload["study_id"] = explicit_study
     return short_hash(json.dumps(payload, sort_keys=True), 16)
 
 
@@ -302,6 +310,8 @@ def read_manifest(path: str | Path) -> list[dict[str, str]]:
             clean = {col: str(row.get(col, "")).strip() for col in MANIFEST_COLUMNS}
             for col in MANIFEST_OPTIONAL_COLUMNS:
                 clean[col] = str(row.get(col, "")).strip() if row.get(col) is not None else ""
+            if "study_id" in (reader.fieldnames or []) and row.get("study_id") is not None:
+                clean["study_id"] = str(row.get("study_id", "")).strip()
             if not clean["GWAS_location"]:
                 raise ValueError(f"Manifest row {i} has empty GWAS_location")
             clean["_line"] = i
@@ -515,9 +525,13 @@ def reference_identity(reference_root: str | Path) -> dict[str, list[int]]:
 
 def settings_fingerprint(record: dict[str, Any], config: dict[str, Any], reference_root: str | Path) -> str:
     """Hash of everything that determines a row's outputs; a mismatch means the outputs are stale."""
+    row_payload = {col: str(record.get(col, "") or "").strip() for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS}
+    explicit_study = str(record.get("study_id", "") or "").strip()
+    if explicit_study and explicit_study != default_study_id(record):
+        row_payload["study_id"] = explicit_study
     payload = {
         "schema": OUTPUT_SCHEMA_VERSION,
-        "row": {col: str(record.get(col, "") or "").strip() for col in MANIFEST_COLUMNS + MANIFEST_OPTIONAL_COLUMNS},
+        "row": row_payload,
         "config": {key: value for key, value in config.items() if key != "_config_path"},
         "references": reference_identity(reference_root),
     }

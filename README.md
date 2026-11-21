@@ -113,6 +113,7 @@ https://opengwas.io/datasets/ebi-a-GCST006464	endometrial cancer	EUR	female	OMar
 | `format` | no | `table` or `vcf` | whether the file is a table of summary statistics or a GWAS-VCF (OpenGWAS files are GWAS-VCFs). It is detected from the file when empty |
 | `study_yaml` | no | a path, relative to the repository or to `manifests/` | a study YAML with settings for this GWAS (step 2); empty when the file needs none |
 | `output_name` | no | letters, digits, `_` and `-`, starting with a letter or digit | the name of the output folder and of every output file (`standardise/<output_name>/<output_name>.gwas.vcf.gz`, `.qc.json`, `.report.html`); when empty the folder is named from the source and the files are `standardised.*`. Each row of a manifest needs its own name; a name with other characters fails that row, and 2 rows with the same name stop the run |
+| `study_id` | no | letters, digits, `_` and `-`, starting with a letter or digit | overrides the `author_year_pmid` study folder name when 1 publication has separate ancestry-specific runs (for example `sun_2023_37794186_ALL` and `sun_2023_37794186_EUR`) |
 
 #### 2. Add a study YAML when a file needs help
 

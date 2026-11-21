@@ -90,6 +90,9 @@ def validate_row(row: dict[str, str], line: int, source_type: str) -> list[str]:
     output_name = str(row.get("output_name", "") or "").strip()
     if output_name and not valid_output_name(output_name):
         errors.append(f"row {line}: output_name '{output_name}' may hold only letters, digits, _ and - (and start with a letter or digit)")
+    explicit_study = str(row.get("study_id", "") or "").strip()
+    if explicit_study and not valid_output_name(explicit_study):
+        errors.append(f"row {line}: study_id '{explicit_study}' may hold only letters, digits, _ and - (and start with a letter or digit)")
     data_format = str(row.get("format", "") or "").strip().lower()
     if data_format and data_format not in FORMAT_VALUES:
         errors.append(f"row {line}: format '{row.get('format')}' must be table or vcf (or empty to detect it)")
